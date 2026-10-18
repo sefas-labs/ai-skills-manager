@@ -1,0 +1,340 @@
+{
+  "name": "ai-skills-manager",
+  "displayName": "AI Skills Manager",
+  "description": "See which AI agents (Claude Code, Cursor, Codex, Copilot) actually load each Agent Skill, catch conflicts and invalid skills, and install skills from GitHub with a security review.",
+  "version": "0.2.0",
+  "publisher": "pietrosanjines",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "agent skills",
+    "SKILL.md",
+    "claude code",
+    "cursor",
+    "codex",
+    "copilot"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In Restricted Mode, skills are listed read-only; installing or removing skills inside the workspace is disabled."
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "skillsManager",
+          "title": "AI Skills",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "skillsManager": [
+        {
+          "id": "skillsManager.tree",
+          "name": "Installed Skills"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "skillsManager.tree",
+        "contents": "No Agent Skills found in the folders that Claude Code, Cursor, Codex or Copilot read.\n[Install from GitHub](command:skillsManager.installFromGitHub)\n[Open Dashboard](command:skillsManager.openDashboard)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "skillsManager.openDashboard",
+        "title": "Open Dashboard",
+        "category": "AI Skills",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "skillsManager.refresh",
+        "title": "Refresh",
+        "category": "AI Skills",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "skillsManager.installFromGitHub",
+        "title": "Install from GitHub…",
+        "category": "AI Skills",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "skillsManager.showInDashboard",
+        "title": "Show Details",
+        "category": "AI Skills"
+      },
+      {
+        "command": "skillsManager.openSkillFile",
+        "title": "Open SKILL.md",
+        "category": "AI Skills",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "skillsManager.revealSkill",
+        "title": "Reveal in File Explorer",
+        "category": "AI Skills"
+      },
+      {
+        "command": "skillsManager.copySkillPath",
+        "title": "Copy Path",
+        "category": "AI Skills"
+      },
+      {
+        "command": "skillsManager.copyMoveSkill",
+        "title": "Copy or Move to…",
+        "category": "AI Skills",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "skillsManager.uninstall",
+        "title": "Remove Skill…",
+        "category": "AI Skills",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "skillsManager.checkUpdates",
+        "title": "Check for Updates",
+        "category": "AI Skills",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "skillsManager.updateSkill",
+        "title": "Update…",
+        "category": "AI Skills",
+        "icon": "$(arrow-circle-up)"
+      },
+      {
+        "command": "skillsManager.signInGitHub",
+        "title": "Sign in to GitHub",
+        "category": "AI Skills"
+      },
+      {
+        "command": "skillsManager.openBackups",
+        "title": "Open Backups Folder",
+        "category": "AI Skills"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "skillsManager.openDashboard",
+          "when": "view == skillsManager.tree",
+          "group": "navigation@1"
+        },
+        {
+          "command": "skillsManager.installFromGitHub",
+          "when": "view == skillsManager.tree",
+          "group": "navigation@2"
+        },
+        {
+          "command": "skillsManager.refresh",
+          "when": "view == skillsManager.tree",
+          "group": "navigation@3"
+        },
+        {
+          "command": "skillsManager.checkUpdates",
+          "when": "view == skillsManager.tree",
+          "group": "9_more@1"
+        },
+        {
+          "command": "skillsManager.openBackups",
+          "when": "view == skillsManager.tree",
+          "group": "9_more"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "skillsManager.updateSkill",
+          "when": "view == skillsManager.tree && viewItem =~ /\\+update$/",
+          "group": "inline@0"
+        },
+        {
+          "command": "skillsManager.openSkillFile",
+          "when": "view == skillsManager.tree && viewItem =~ /^skill/",
+          "group": "inline@1"
+        },
+        {
+          "command": "skillsManager.uninstall",
+          "when": "view == skillsManager.tree && viewItem =~ /^skill(\\+update)?$/",
+          "group": "inline@2"
+        },
+        {
+          "command": "skillsManager.showInDashboard",
+          "when": "view == skillsManager.tree && viewItem =~ /^skill/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "skillsManager.openSkillFile",
+          "when": "view == skillsManager.tree && viewItem =~ /^skill/",
+          "group": "1_open@2"
+        },
+        {
+          "command": "skillsManager.revealSkill",
+          "when": "view == skillsManager.tree && viewItem =~ /^skill/",
+          "group": "1_open@3"
+        },
+        {
+          "command": "skillsManager.copySkillPath",
+          "when": "view == skillsManager.tree && viewItem =~ /^skill/",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "skillsManager.copyMoveSkill",
+          "when": "view == skillsManager.tree && viewItem =~ /^skill/",
+          "group": "2_copy@2"
+        },
+        {
+          "command": "skillsManager.uninstall",
+          "when": "view == skillsManager.tree && viewItem =~ /^skill(\\+update)?$/",
+          "group": "9_remove@1"
+        },
+        {
+          "command": "skillsManager.updateSkill",
+          "when": "view == skillsManager.tree && viewItem =~ /\\+update$/",
+          "group": "1_open@0"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "skillsManager.showInDashboard",
+          "when": "false"
+        },
+        {
+          "command": "skillsManager.openSkillFile",
+          "when": "false"
+        },
+        {
+          "command": "skillsManager.revealSkill",
+          "when": "false"
+        },
+        {
+          "command": "skillsManager.copySkillPath",
+          "when": "false"
+        },
+        {
+          "command": "skillsManager.uninstall",
+          "when": "false"
+        },
+        {
+          "command": "skillsManager.updateSkill",
+          "when": "false"
+        },
+        {
+          "command": "skillsManager.copyMoveSkill",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AI Skills Manager",
+      "properties": {
+        "skillsManager.providers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "claude-code",
+              "cursor",
+              "codex",
+              "copilot"
+            ]
+          },
+          "default": [
+            "claude-code",
+            "cursor",
+            "codex",
+            "copilot"
+          ],
+          "uniqueItems": true,
+          "description": "Agents whose skill folders are scanned. Remove the ones you don't use to reduce noise."
+        },
+        "skillsManager.extraLocations": {
+          "type": "array",
+          "default": [],
+          "description": "Additional skill folders to scan (for agents not built in yet).",
+          "items": {
+            "type": "object",
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Absolute path, ~/path, or a path relative to the first workspace folder."
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "global",
+                  "workspace"
+                ],
+                "default": "global"
+              },
+              "readers": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Agent ids that load skills from this folder (free text)."
+              }
+            }
+          }
+        },
+        "skillsManager.showEmptyLocations": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show skill folders that exist but contain no skills in the side bar."
+        },
+        "skillsManager.checkForUpdatesOnStartup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Check GitHub for skill updates when the editor starts (at most every 12 hours; uses the cached result otherwise). Off by default to save API requests."
+        },
+        "skillsManager.scanParentFolders": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a workspace folder is inside a larger git repository, also scan the parent folders up to the repository root (Claude Code reads .claude/skills there, Codex .agents/skills)."
+        },
+        "skillsManager.scanNestedFolders": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scan .claude/skills, .agents/skills and .cursor/skills folders nested inside the workspace (monorepos). Bounded: skips hidden, node_modules and build folders, max depth 6."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node -e \"require('fs').rmSync('out-test',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node scripts/run-tests.mjs out-test/test .test.js",
+    "test:smoke": "node scripts/build.mjs && node scripts/run-tests.mjs test/smoke .test.mjs",
+    "test:all": "npm run test && npm run test:smoke",
+    "package": "vsce package --no-dependencies --allow-missing-repository",
+    "package:offline": "node scripts/build.mjs --production && node scripts/package-vsix.mjs",
+    "vscode:prepublish": "node scripts/build.mjs --production",
+    "test:e2e": "node scripts/build.mjs && node test/e2e/run.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "~1.90.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}

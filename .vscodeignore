@@ -1,0 +1,10 @@
+**
+!package.json
+!README.md
+!CHANGELOG.md
+!LICENSE
+!dist/extension.js
+!dist/webview.js
+!media/dashboard.css
+!media/icon.svg
+!media/icon.png
