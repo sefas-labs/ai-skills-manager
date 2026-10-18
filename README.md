@@ -1,128 +1,128 @@
 # AI Skills Manager
 
-**Mira qué agente de IA carga realmente cada Agent Skill, detecta duplicados y skills rotos, e instala skills desde GitHub con revisión de seguridad.** Funciona en VS Code y en editores compatibles como Cursor.
+**See which AI agent actually loads each Agent Skill, catch duplicates and broken skills, and install skills from GitHub with a security review.** Works in VS Code and compatible editors such as Cursor.
 
-Claude Code, Cursor, Codex y GitHub Copilot leen skills (`SKILL.md`) desde carpetas que se solapan, pero ninguna carpeta llega a los cuatro. Esta extensión lo muestra en un solo lugar.
+Claude Code, Cursor, Codex and GitHub Copilot read skills (`SKILL.md`) from overlapping folders, but no single folder reaches all four. This extension shows the whole picture in one place.
 
-Capturas en `docs/images/`.
+Screenshots are in `docs/images/`.
 
-## Qué hace (v0.2)
+## What it does (v0.2)
 
-- **Inventario multi-agente:** escanea las carpetas globales y del workspace que cada agente lee según su documentación oficial, más las carpetas extra que configures.
-  - **Monorepos:** también las carpetas padre hasta la raíz del repo (Claude Code, Codex) y las carpetas de skills anidadas (Claude Code, Cursor).
-  - Incluye los skills sincronizados desde claude.ai (`~/.claude/skills/synced`, solo lectura).
-- **Matriz de visibilidad:** qué agente carga qué carpeta y, por tanto, cada skill.
-- **Diagnóstico:**
-  - nombres duplicados que un mismo agente ve en dos carpetas distintas;
-  - frontmatter inválido según [agentskills.io](https://agentskills.io/specification) (`name` ≠ carpeta, `description` ausente, longitudes);
-  - `skill.md` con mayúsculas incorrectas;
-  - symlinks rotos;
-  - carpetas sin `SKILL.md`.
-- **Instalar desde GitHub** (repo, carpeta, `…/blob/…/SKILL.md` u `owner/repo`):
-  1. Analiza el repo y rechaza los que no son skills, indicando si parecen un plugin o un servidor MCP.
-  2. Te deja elegir qué skills instalar.
-  3. Descarga el **commit exacto** a una zona temporal y revisa todo el contenido.
-  4. Te muestra qué agentes verán el skill según el destino que elijas.
-  5. Pide confirmación antes de escribir nada.
-- **Desinstalar con seguridad:** la carpeta va a un backup recuperable. Si es un symlink, solo se elimina el enlace.
-- **Procedencia:** guarda repo, ref, commit y tree SHA de lo instalado. También lee la que escribe `gh skill install` en el SKILL.md.
-- **Actualizaciones:** *Check for Updates* compara el tree SHA instalado con el remoto (2 llamadas a la API por repo y rama). *Update…* muestra antes los archivos añadidos, modificados y eliminados, tus cambios locales y la revisión de seguridad; después reemplaza la carpeta guardando un backup.
-- **Copiar o mover** entre carpetas (global ↔ workspace, `.claude/skills` ↔ `.agents/skills`): antes de escribir, muestra qué agentes ganan y pierden el skill.
-- Panel lateral, dashboard, temas claro/oscuro/alto contraste, Workspace Trust.
+- **Multi-agent inventory:** scans the global and workspace folders that each agent reads according to its official documentation, plus any extra folders you configure.
+  - **Monorepos:** also scans parent folders up to the repository root (Claude Code, Codex) and nested skills folders (Claude Code, Cursor).
+  - Includes skills synced from claude.ai (`~/.claude/skills/synced`, read-only).
+- **Visibility matrix:** which agent loads which folder, and therefore each skill.
+- **Diagnostics:**
+  - duplicate names that one agent sees in two different folders;
+  - frontmatter that breaks the [agentskills.io](https://agentskills.io/specification) spec (`name` ≠ folder name, missing `description`, length limits);
+  - `skill.md` with the wrong casing;
+  - broken symlinks;
+  - folders without a `SKILL.md`.
+- **Install from GitHub** (repository, folder, `…/blob/…/SKILL.md` or `owner/repo`):
+  1. Analyzes the repository and rejects anything that isn't a skill, with a hint when it looks like a plugin or an MCP server.
+  2. Lets you choose which skills to install.
+  3. Downloads the **exact commit** to a staging area and reviews all of its content.
+  4. Shows which agents will see the skill in the destination you pick.
+  5. Asks for confirmation before writing anything.
+- **Safe uninstall:** the folder is moved to a recoverable backup. If it's a symlink, only the link is removed.
+- **Provenance:** records the repository, ref, commit and tree SHA of everything it installs. It also reads the provenance that `gh skill install` writes into `SKILL.md`.
+- **Updates:** *Check for Updates* compares the installed tree SHA with the remote one (2 API calls per repository and branch). *Update…* first shows the added, modified and removed files, your local edits and the security review, then replaces the folder and keeps a backup.
+- **Copy or move** between folders (global ↔ workspace, `.claude/skills` ↔ `.agents/skills`): before writing, shows which agents gain and lose the skill.
+- Side bar, dashboard, light/dark/high-contrast themes, Workspace Trust.
 
-## Modelo de seguridad
+## Security model
 
-- **Nunca ejecuta** nada de un repositorio. Los archivos se escriben **sin permiso de ejecución**.
-- Revisión automática (heurística) de cada archivo:
-  - Unicode invisible o bidireccional;
-  - texto que intenta anular instrucciones del agente;
-  - `curl … | sh` y `base64 -d | sh`;
-  - envío de variables tipo `*_TOKEN`;
-  - rutas de credenciales (`~/.ssh`, `~/.aws`);
-  - binarios, scripts y comentarios HTML ocultos.
+- **Never executes** anything from a repository. Files are written **without execute permission**.
+- Automatic (heuristic) review of every file:
+  - invisible or bidirectional Unicode;
+  - text that tries to override the agent's instructions;
+  - `curl … | sh` and `base64 -d | sh`;
+  - sending variables such as `*_TOKEN` elsewhere;
+  - credential paths (`~/.ssh`, `~/.aws`);
+  - binaries, scripts and hidden HTML comments.
 
-  Si hay hallazgos de riesgo alto, se pide una **segunda confirmación**. *Las heurísticas no garantizan seguridad: instala solo de fuentes en las que confíes.*
-- Protección contra path traversal (rutas absolutas, `..`, nombres inválidos en Windows). Los symlinks y submódulos del repo se omiten.
-- Nunca sobrescribe sin consentimiento. Lo reemplazado se guarda en backup, y ante un fallo hay rollback automático.
-- El token de GitHub (opcional, desde la sesión del editor) vive solo en memoria, se envía únicamente a `api.github.com` y `raw.githubusercontent.com`, y nunca llega al webview.
-- En **Restricted Mode** las carpetas del workspace son de solo lectura.
-- Webview con CSP estricta (sin `unsafe-inline`), y todo el contenido se inserta como texto.
+  High-risk findings require a **second confirmation**. *Heuristics don't guarantee safety: only install from sources you trust.*
+- Path-traversal protection (absolute paths, `..`, names that are invalid on Windows). Symlinks and submodules in the repository are skipped.
+- Never overwrites without consent. Anything replaced goes to a backup, and a failure triggers an automatic rollback.
+- The GitHub token (optional, from the editor's sign-in) lives only in memory, is sent only to `api.github.com` and `raw.githubusercontent.com`, and never reaches the webview.
+- In **Restricted Mode**, workspace folders are read-only.
+- The webview uses a strict CSP (no `unsafe-inline`), and all content is inserted as text.
 
-## Uso
+## Usage
 
-- Icono **AI Skills** en la barra de actividad → árbol por alcance (Workspace / Global / Admin) → carpeta → skill. Clic en un skill para ver el detalle; botón derecho para Open, Reveal, Copy path, Copy or Move to…, Update… y Remove.
-- Botones del panel: **Open Dashboard**, **Install from GitHub…**, **Refresh**.
-- Paleta de comandos: `AI Skills: …`
+- **AI Skills** icon in the activity bar → tree by scope (Workspace / Global / Admin) → folder → skill. Click a skill to see its details; right-click for Open, Reveal, Copy Path, Copy or Move to…, Update… and Remove.
+- Side bar buttons: **Open Dashboard**, **Install from GitHub…**, **Refresh**.
+- Command palette: `AI Skills: …`
 
-### Ajustes
+### Settings
 
-| Ajuste | Para qué |
+| Setting | Purpose |
 |---|---|
-| `skillsManager.providers` | Agentes a escanear (quita los que no uses) |
-| `skillsManager.extraLocations` | Carpetas extra, p. ej. `{ "path": "~/.codeium/windsurf/skills", "readers": ["windsurf"] }` |
-| `skillsManager.showEmptyLocations` | Mostrar carpetas existentes sin skills |
-| `skillsManager.scanParentFolders` | Carpetas padre hasta la raíz del repo (por defecto: sí) |
-| `skillsManager.scanNestedFolders` | Carpetas de skills anidadas en el workspace (por defecto: sí; profundidad máx. 6, omite `node_modules` y carpetas de build) |
-| `skillsManager.checkForUpdatesOnStartup` | Comprobar actualizaciones al arrancar, como mucho cada 12 h (por defecto: no) |
+| `skillsManager.providers` | Agents to scan (remove the ones you don't use) |
+| `skillsManager.extraLocations` | Extra folders, e.g. `{ "path": "~/.codeium/windsurf/skills", "readers": ["windsurf"] }` |
+| `skillsManager.showEmptyLocations` | Show existing folders that contain no skills |
+| `skillsManager.scanParentFolders` | Parent folders up to the repository root (default: on) |
+| `skillsManager.scanNestedFolders` | Skills folders nested inside the workspace (default: on; max depth 6, skips `node_modules` and build folders) |
+| `skillsManager.checkForUpdatesOnStartup` | Check for updates on startup, at most every 12 hours (default: off) |
 
-## Desarrollo
+## Development
 
-Requisitos: Node 18+ y VS Code 1.90+.
+Requirements: Node 18+ and VS Code 1.90+.
 
 ```bash
 npm install
 npm run build        # esbuild → dist/
-npm test             # 57 tests unitarios + integración (Node test runner, GitHub simulado)
-npm run test:smoke   # carga dist/extension.js con una API de vscode simulada
-npm run test:e2e     # ejecuta la extensión dentro de VS Code real (perfil temporal, proxy local, GitHub real)
-node test/e2e/run.mjs /Applications/Cursor.app/Contents/MacOS/Cursor   # lo mismo en Cursor
-npm run typecheck    # tsc con @types/vscode
+npm test             # 57 unit + integration tests (Node test runner, simulated GitHub)
+npm run test:smoke   # loads dist/extension.js against a simulated vscode API
+npm run test:e2e     # runs the extension inside real VS Code (temporary profile, local proxy, real GitHub)
+node test/e2e/run.mjs /Applications/Cursor.app/Contents/MacOS/Cursor   # same, in Cursor
+npm run typecheck    # tsc with @types/vscode
 ```
 
-### Ejecutar en VS Code
+### Run in VS Code
 
-1. Abre esta carpeta en VS Code.
-2. Pulsa **F5** (*Run Extension*) para abrir una ventana *Extension Development Host* con la extensión cargada. *Run Extension (clean profile)* la arranca sin tus otras extensiones.
-3. Para ver datos, crea un skill de prueba:
+1. Open this folder in VS Code.
+2. Press **F5** (*Run Extension*) to open an *Extension Development Host* window with the extension loaded. *Run Extension (clean profile)* starts it without your other extensions.
+3. To see some data, create a test skill:
    ```bash
-   mkdir -p ~/.agents/skills/hola && printf -- '---\nname: hola\ndescription: Saluda. Úsalo para probar.\n---\nDi hola.\n' > ~/.agents/skills/hola/SKILL.md
+   mkdir -p ~/.agents/skills/hello && printf -- '---\nname: hello\ndescription: Says hello. Use it for testing.\n---\nSay hello.\n' > ~/.agents/skills/hello/SKILL.md
    ```
-4. Prueba una instalación real con `https://github.com/anthropics/skills`.
+4. Try a real install with `https://github.com/anthropics/skills`.
 
-### Generar el VSIX
+### Build the VSIX
 
 ```bash
 npm run build -- --production
-npm run package             # oficial: @vscode/vsce → ai-skills-manager-0.2.0.vsix
-# sin acceso a npm/vsce:
-npm run package:offline     # empaquetador propio sin dependencias (scripts/package-vsix.mjs)
+npm run package             # official: @vscode/vsce → ai-skills-manager-0.2.0.vsix
+# without npm/vsce access:
+npm run package:offline     # dependency-free packager (scripts/package-vsix.mjs)
 ```
 
-Instalar: `code --install-extension ai-skills-manager-0.2.0.vsix`, o en la paleta **Extensions: Install from VSIX…**
+Install: `code --install-extension ai-skills-manager-0.2.0.vsix`, or **Extensions: Install from VSIX…** in the command palette.
 
-Para publicar en el Marketplace hace falta `vsce publish` con un publisher real (cambia `publisher` en `package.json`). Para Open VSX (que es lo que usa Cursor): `npx ovsx publish ai-skills-manager-0.2.0.vsix -p <token>`.
+Publishing to the Marketplace requires `vsce publish` with a real publisher (change `publisher` in `package.json`). For Open VSX (which Cursor uses): `npx ovsx publish ai-skills-manager-0.2.0.vsix -p <token>`.
 
-### Probar en Cursor
+### Test in Cursor
 
-1. Instala el VSIX: paleta → **Extensions: Install from VSIX…**, o `cursor --install-extension ai-skills-manager-0.2.0.vsix`.
+1. Install the VSIX: command palette → **Extensions: Install from VSIX…**, or `cursor --install-extension ai-skills-manager-0.2.0.vsix`.
 2. Checklist:
-   - [ ] Aparece el icono **AI Skills** en la barra lateral.
-   - [ ] La matriz muestra `~/.cursor/skills`, `~/.agents/skills`, `~/.claude/skills` y `~/.codex/skills` como leídas por Cursor.
-   - [ ] Instala un skill en `~/.cursor/skills` y comprueba que aparece en **Cursor Settings → Rules & Skills** (o escribiendo `/` en el chat).
-   - [x] Cursor 3.25.9 ofrece el proveedor de auth `github` (verificado con `test:e2e`). Sin login, la extensión sigue funcionando (límite de 60 peticiones/hora).
-   - [ ] Elimina el skill y comprueba que Cursor deja de verlo.
+   - [ ] The **AI Skills** icon appears in the side bar.
+   - [ ] The matrix shows `~/.cursor/skills`, `~/.agents/skills`, `~/.claude/skills` and `~/.codex/skills` as read by Cursor.
+   - [ ] Install a skill into `~/.cursor/skills` and check that it appears in **Cursor Settings → Rules & Skills** (or by typing `/` in the chat).
+   - [x] Cursor 3.25.9 provides the `github` auth provider (verified with `test:e2e`). Without signing in, the extension keeps working (limit of 60 requests/hour).
+   - [ ] Remove the skill and check that Cursor no longer sees it.
 
-## Limitaciones conocidas (v0.2)
+## Known limitations (v0.2)
 
-- No muestra skills de plugins (Claude/Cursor), la ruta enterprise de Claude Code ni skills aportados por extensiones de VS Code.
-- Cursor recorre cada carpeta de skills de forma recursiva (`skills/<grupo>/<skill>/SKILL.md`); aquí solo se lee el primer nivel.
-- Solo GitHub (no GitLab ni Bitbucket). En repos gigantes el árbol puede venir truncado.
-- Los modales de instalar, actualizar, copiar/mover y desinstalar no tienen test automático en el editor real (requieren clics): ver *Pendiente de prueba manual* en `docs/ANALISIS.md`.
-- El proxy se verificó con `http.proxy` en VS Code 1.140 y Cursor 3.25.9 (base 1.128). En versiones antiguas de VS Code, `fetch` puede no respetarlo.
-- Aún no hay habilitar/deshabilitar, ni gestión de MCP, agentes o reglas: ver el roadmap en `docs/ANALISIS.md`.
+- Doesn't show skills from plugins (Claude/Cursor), Claude Code's enterprise path, or skills contributed by VS Code extensions.
+- Cursor walks each skills folder recursively (`skills/<group>/<skill>/SKILL.md`); this extension only reads the first level.
+- GitHub only (no GitLab or Bitbucket). In huge repositories the file tree may come back truncated.
+- The install, update, copy/move and uninstall dialogs have no automated test in the real editor (they need clicks): see *Pendiente de prueba manual* in `docs/ANALISIS.md`.
+- The proxy was verified with `http.proxy` in VS Code 1.140 and Cursor 3.25.9 (based on VS Code 1.128). In older VS Code versions, `fetch` may not honor it.
+- No enable/disable yet, and no management of MCP servers, agents or rules: see the roadmap in `docs/ANALISIS.md`.
 
-Análisis completo de mercado, producto y arquitectura: `docs/ANALISIS.md`.
+Full market, product and architecture analysis (in Spanish): `docs/ANALISIS.md`.
 
-## Licencia
+## License
 
 MIT
