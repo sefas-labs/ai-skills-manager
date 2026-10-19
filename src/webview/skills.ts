@@ -356,10 +356,16 @@ export function skillsView(t: SkillsTab): Node {
             ...(bundles.length && loose.length ? [label('Your skills')] : []),
             ...nameRows(loose),
             ...(bundles.length ? [label(`From plugins & sources · ${bundles.length}`)] : []),
-            ...bundles.map(([b, list]) => bundleRows(b, list, fillList)),
+            ...bundles.map(([b, list]) => bundleRows(b, list, refillKeepingScroll)),
           ]
         : [h('p', { class: 'muted pad' }, 'No skills match these filters.')]),
     );
+  };
+  // Emptying the list resets its scroll to 0 in Chromium: opening or closing a bundle must not jump.
+  const refillKeepingScroll = () => {
+    const top = listEl.scrollTop;
+    fillList();
+    listEl.scrollTop = top;
   };
   fillList();
 

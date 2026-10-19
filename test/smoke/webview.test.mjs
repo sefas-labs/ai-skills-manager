@@ -270,3 +270,21 @@ test('skills list: skills from the same plugin / source collapse into one bundle
   assert.deepEqual(heads(), []);
   assert.ok(doc.body.textContent.includes('code-review'));
 });
+
+test('opening or closing a bundle keeps the list scroll position', () => {
+  const { dom, doc, post } = mount({ tab: 'global', selected: 'g2' });
+  const store = new WeakMap();
+  Object.defineProperty(dom.window.HTMLElement.prototype, 'scrollTop', { get() { return store.get(this) ?? 0; }, set(v) { store.set(this, v); }, configurable: true });
+  // Like Chromium: emptying a scroll container resets its scroll to 0.
+  const replace = dom.window.Element.prototype.replaceChildren;
+  dom.window.Element.prototype.replaceChildren = function (...nodes) { store.delete(this); return replace.apply(this, nodes); };
+  const state = fixture();
+  for (let i = 0; i < 3; i++) state.skills.push(skill(`a${i}`, `s${i}`, 'pl', 'plugin agent-skills', 'global', ['claude-code'], { namespace: 'agent-skills', readOnly: true }));
+  post({ type: 'state', state });
+  doc.querySelector('.list').scrollTop = 400;
+  doc.querySelector('.bundle-head').click();
+  assert.ok(doc.querySelector('.bundle.open'));
+  assert.equal(doc.querySelector('.list').scrollTop, 400, 'open keeps scroll');
+  doc.querySelector('.bundle-head').click();
+  assert.equal(doc.querySelector('.list').scrollTop, 400, 'close keeps scroll');
+});
