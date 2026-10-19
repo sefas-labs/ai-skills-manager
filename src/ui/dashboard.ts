@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { FEATURED_SOURCES } from '../core/catalog';
+import { archiveSyncedBucket } from '../core/discovery';
 import { parseGitHubUrl } from '../core/github';
 import {
   cleanupStaging,
@@ -146,6 +147,27 @@ export class DashboardPanel implements vscode.Disposable {
         case 'catalogSearch': {
           const skills = await this.withBusy('catalogSearch', () => this.service.catalog.search(m.query));
           this.post({ type: 'catalogResults', query: m.query, skills });
+          return;
+        }
+        case 'archiveSynced': {
+          const loc = this.service.current?.locations.find((l) => l.skippedSyncedBuckets?.some((b) => b.bucket === m.bucket));
+          const b = loc?.skippedSyncedBuckets?.find((x) => x.bucket === m.bucket);
+          if (!b) return;
+          const ok = await vscode.window.showWarningMessage(
+            `Move the claude.ai skills of another account to the backup folder?`,
+            {
+              modal: true,
+              detail: `${b.path}\n\n${b.skills.length} skill(s), last synced ${b.lastSynced ? new Date(b.lastSynced).toLocaleDateString() : 'on an unknown date'}: ${b.skills.join(', ')}.\n\nClaude Code doesn't load them (they belong to an account you're not signed in with). If you sign in with that account again, Claude Code downloads them again.`,
+            },
+            'Move to Backup',
+          );
+          if (ok !== 'Move to Backup') return;
+          const dest = await archiveSyncedBucket(this.service.current!.context.homeDir, m.bucket, this.service.backupDir);
+          log().info(`archive synced bucket ${m.bucket} → ${dest}`);
+          await this.service.refresh();
+          vscode.window.showInformationMessage('Moved the other account’s synced skills to the backup folder.', 'Show Backups').then((c) => {
+            if (c) vscode.commands.executeCommand('skillsManager.openBackups');
+          });
           return;
         }
         case 'openUrl':

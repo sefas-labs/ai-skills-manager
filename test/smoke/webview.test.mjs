@@ -31,6 +31,7 @@ function fixture() {
       loc('wa', '.agents/skills', 'workspace', ['cursor', 'codex', 'copilot']),
       loc('wc', '.claude/skills', 'workspace', ['claude-code', 'cursor', 'copilot']),
       loc('wx', '.codex/skills', 'workspace', ['cursor'], { exists: false, skillCount: 0 }),
+      loc('pl', 'plugin dev', 'global', ['claude-code'], { origin: 'plugin', namespace: 'dev', readOnly: true }),
       loc('gc', '~/.claude/skills', 'global', ['claude-code', 'cursor', 'copilot'], { skippedSynced: 1, skippedSyncedBuckets: [{ bucket: '11111111-1111-1111-1111-111111111111_22222222-2222-2222-2222-222222222222', path: '/x', skills: ['docs'], lastSynced: '2026-09-19T00:00:00Z' }] }),
     ],
     merges: [{ id: 'm1', name: 'deploy', scope: 'workspace', verdict: 'unify-versions', identical: false, seenTwiceBy: ['copilot', 'cursor'], stillTwiceBy: ['copilot', 'cursor'], keep: ['d1', 'd2'], remove: [],
@@ -44,6 +45,7 @@ function fixture() {
       }),
       skill('g1', 'docs', 'gc', '~/.claude/skills', 'global', ['claude-code', 'cursor', 'copilot'], { readOnly: true, managed: 'synced', readOnlyReason: 'Synced from claude.ai' }),
       skill('g2', 'checklist', 'gc', '~/.claude/skills', 'global', ['claude-code', 'cursor', 'copilot']),
+      skill('p1', 'checklist', 'pl', 'plugin dev', 'global', ['claude-code'], { namespace: 'dev', readOnly: true, readOnlyReason: 'Installed by a plugin' }),
     ],
   };
 }
@@ -115,6 +117,11 @@ test('global tab explains the other claude.ai account and offers Add to project'
   assert.match(doc.querySelector('.synced-notice').textContent, /1 synced skill from another claude\.ai account is not listed/);
   click('Add to project…');
   assert.deepEqual(sent.at(-1), { type: 'addToProject', skillId: 'g2' });
+  // A plugin skill with the same name is a different skill (dev:checklist), not a second copy.
+  assert.equal(doc.querySelectorAll('.group').length, 0);
+  assert.ok([...doc.querySelectorAll('.list .name')].some((n) => n.textContent === 'dev:checklist'));
+  click('Move to backup…');
+  assert.deepEqual(sent.at(-1), { type: 'archiveSynced', bucket: '11111111-1111-1111-1111-111111111111_22222222-2222-2222-2222-222222222222' });
 });
 
 test('map: coverage gaps offer Copy to; diagram highlights on hover', () => {

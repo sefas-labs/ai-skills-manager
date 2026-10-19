@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { discover, readClaudeSyncBucket } from '../../src/core/discovery';
+import { archiveSyncedBucket, discover, readClaudeSyncBucket } from '../../src/core/discovery';
 import { BUILTIN_PROVIDERS } from '../../src/core/providers';
 import type { DiscoveryContext } from '../../src/core/types';
 import { skillMd, tempDir, writeSkill } from '../helpers/fsFixture';
@@ -102,7 +102,13 @@ test('extra locations from settings and admin location on non-Windows only', asy
   assert.deepEqual(r.skills.find((s) => s.name === 'mine')!.visibleTo, ['windsurf']);
   assert.ok(r.locations.some((l) => l.scope === 'admin'));
   const win = await discover({ ...ctx, platform: 'win32', homeDir: home }, BUILTIN_PROVIDERS);
-  assert.ok(!win.locations.some((l) => l.scope === 'admin'));
+  // Simulated win32 on a POSIX host: path.resolve keeps the Windows path as a suffix.
+  const winAdmin = win.locations.filter((l) => l.scope === 'admin');
+  assert.equal(winAdmin.length, 1, 'Windows: only Claude Code enterprise skills, no /etc/codex');
+  assert.ok(winAdmin[0].path.endsWith('C:\\Program Files\\ClaudeCode\\.claude\\skills'));
+  assert.deepEqual(winAdmin[0].readers, ['claude-code']);
+  const mac = await discover({ ...ctx, platform: 'darwin' }, BUILTIN_PROVIDERS);
+  assert.ok(mac.locations.some((l) => l.path === '/Library/Application Support/ClaudeCode/.claude/skills' && l.readOnly));
 });
 
 test('claude.ai synced skills one level below a per-account bucket are found (real layout)', async () => {
@@ -165,4 +171,38 @@ test('identical copies in two folders are informational, different ones a warnin
   const sameIds = r.skills.filter((s) => s.name === 'same').map((s) => s.contentId);
   assert.ok(sameIds[0] && sameIds[0] === sameIds[1]);
   assert.deepEqual(r.providers.find((p) => p.id === 'cursor')!.duplicateNames, ['diff']);
+});
+
+test('Cursor walks category folders; other readers of the same root do not', async () => {
+  const { home, ctx } = await setup();
+  await writeSkill(path.join(home, '.agents/skills/shipping'), 'deploy');
+  await writeSkill(path.join(home, '.agents/skills/workflow/deep'), 'triage');
+  await fs.mkdir(path.join(home, '.agents/skills/empty-group/nothing'), { recursive: true });
+  const r = await discover(ctx, BUILTIN_PROVIDERS);
+  const deploy = r.skills.find((s) => s.name === 'deploy')!;
+  assert.deepEqual(deploy.visibleTo, ['cursor']);
+  assert.equal(deploy.group, 'shipping');
+  const issue = deploy.issues.find((i) => i.code === 'in-category-folder')!;
+  assert.equal(issue.severity, 'warning');
+  assert.match(issue.message, /only Cursor finds it; Codex, GitHub Copilot only read skills directly/);
+  assert.equal(r.skills.find((s) => s.name === 'triage')!.group, 'workflow/deep');
+  const loc = r.locations.find((l) => l.path === path.join(home, '.agents/skills'))!;
+  assert.deepEqual(loc.ignoredEntries, ['empty-group/']);
+});
+
+test('archiving the other account’s synced folder: refuses the active one, moves the leftover', async () => {
+  const { root, home } = await setup();
+  const active = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+  const other = 'cccccccc-cccc-cccc-cccc-cccccccccccc_dddddddd-dddd-dddd-dddd-dddddddddddd';
+  await writeSkill(path.join(home, '.claude/skills/synced', active), 'docs');
+  await writeSkill(path.join(home, '.claude/skills/synced', other), 'docs');
+  const backups = path.join(root, 'backups');
+  await assert.rejects(archiveSyncedBucket(home, other, backups), /signed in/);
+  await fs.writeFile(path.join(home, '.claude.json'), JSON.stringify({ oauthAccount: { organizationUuid: active.split('_')[0], accountUuid: active.split('_')[1] } }));
+  await assert.rejects(archiveSyncedBucket(home, active, backups), /signed-in/);
+  await assert.rejects(archiveSyncedBucket(home, '../../etc', backups), /Not a claude\.ai sync folder/);
+  const dest = await archiveSyncedBucket(home, other, backups);
+  await fs.access(path.join(dest, 'docs/SKILL.md'));
+  await assert.rejects(fs.access(path.join(home, '.claude/skills/synced', other)));
+  await fs.access(path.join(home, '.claude/skills/synced', active, 'docs/SKILL.md'));
 });

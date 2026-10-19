@@ -6,9 +6,11 @@ import { parseFrontmatter } from './frontmatter';
 import { pathKey, tildify } from './paths';
 import { contentFingerprint } from './hashing';
 import { expandContext } from './monorepo';
+import { claudePluginSkillRoots } from './plugins';
 import { trackedFromGhFrontmatter } from './provenance';
 import { validateSkill } from './validate';
 import type { LockStore } from './lockfile';
+import { UserError } from './types';
 import type {
   DiscoveryContext,
   DiscoveryResult,
@@ -29,6 +31,8 @@ export interface DiscoverOptions {
   extraLocations?: Array<ReadLocation & { readers: string[] }>;
   /** Marks workspace locations read-only (e.g. untrusted workspace). */
   workspaceReadOnlyReason?: string;
+  /** Read enabled Claude Code plugins' skills (fills ctx.claudePlugins). */
+  plugins?: { pluginsRoot?: string };
   /** Find parent folders up to the repo root and nested skills folders (fills ctx.repoRoots / ctx.nestedDirs). */
   monorepo?: { parents: boolean; nested: boolean };
 }
@@ -40,7 +44,7 @@ export function resolveLocations(
   opts: DiscoverOptions = {},
 ): ResolvedLocation[] {
   const byKey = new Map<string, ResolvedLocation>();
-  const add = (loc: ReadLocation, reader: string) => {
+  const add = (loc: ReadLocation, reader: string, recursive = false) => {
     const abs = path.resolve(loc.path);
     const key = pathKey(abs, ctx.platform);
     let r = byKey.get(key);
@@ -57,6 +61,7 @@ export function resolveLocations(
         managedSubdirs: loc.managedSubdirs ? { ...loc.managedSubdirs } : undefined,
         origin: loc.origin,
         appliesTo: loc.appliesTo,
+        namespace: loc.namespace,
         exists: false,
         skillCount: 0,
         ignoredEntries: [],
@@ -70,8 +75,9 @@ export function resolveLocations(
       if (loc.managedSubdirs) r.managedSubdirs = { ...(r.managedSubdirs ?? {}), ...loc.managedSubdirs };
     }
     if (!r.readers.includes(reader)) r.readers.push(reader);
+    if (recursive && !(r.recursiveReaders ??= []).includes(reader)) r.recursiveReaders.push(reader);
   };
-  for (const a of adapters) for (const loc of a.readLocations(ctx)) add(loc, a.id);
+  for (const a of adapters) for (const loc of a.readLocations(ctx)) add(loc, a.id, a.recursiveRoots);
   for (const extra of opts.extraLocations ?? []) for (const reader of extra.readers) add(extra, reader);
 
   const list = [...byKey.values()];
@@ -217,6 +223,7 @@ async function readSkill(
     issues,
     readOnly: extra.readOnly,
     readOnlyReason: extra.readOnlyReason,
+    namespace: loc.namespace,
     source: lockEntry,
     sourceHint: lockEntry ? undefined : findSourceHint(fm.data),
     ghSource: lockEntry ? undefined : trackedFromGhFrontmatter(fm.data),
@@ -307,6 +314,29 @@ const BUCKET_RE = new RegExp(`^${UUID}_${UUID}$`, 'i');
  * signed in with, read from ~/.claude.json (only those two fields). The synced
  * bucket names use this format (observed 2026-10-18; not documented).
  */
+/**
+ * Moves the synced bucket of another claude.ai account (a leftover Claude Code
+ * no longer loads) to the backup folder. Refuses the signed-in account's
+ * bucket and anything that isn't `~/.claude/skills/synced/<org>_<account>`.
+ */
+export async function archiveSyncedBucket(homeDir: string, bucket: string, backupRoot: string): Promise<string> {
+  if (!BUCKET_RE.test(bucket)) throw new UserError('Not a claude.ai sync folder.');
+  const active = await readClaudeSyncBucket(homeDir);
+  if (!active) throw new UserError('Can’t tell which claude.ai account is signed in, so nothing is moved.');
+  if (active === bucket.toLowerCase()) throw new UserError('That folder belongs to the signed-in claude.ai account.');
+  const dir = path.join(homeDir, '.claude', 'skills', 'synced', bucket);
+  const st = await fs.lstat(dir).catch(() => null);
+  if (!st?.isDirectory()) throw new UserError('The folder no longer exists. Refresh the list.');
+  await fs.mkdir(backupRoot, { recursive: true });
+  const dest = path.join(backupRoot, `${new Date().toISOString().replace(/[:.]/g, '-')}-claude-ai-${bucket.slice(0, 8)}`);
+  await fs.rename(dir, dest).catch(async (e: NodeJS.ErrnoException) => {
+    if (e.code !== 'EXDEV') throw e;
+    await fs.cp(dir, dest, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  return dest;
+}
+
 /** `lastUpdated` (epoch ms) from a synced bucket's manifest.json; undefined if absent or odd. */
 async function manifestDate(bucketDir: string): Promise<string | undefined> {
   try {
@@ -354,10 +384,29 @@ async function scanLocation(loc: ResolvedLocation, opts: DiscoverOptions, ctx: D
     const rec = await readSkill(entryPath, entry.name, loc, { readOnly: loc.readOnly, readOnlyReason: loc.readOnlyReason }, opts).catch(
       () => 'not-a-skill' as const,
     );
-    if (rec === 'not-a-skill') loc.ignoredEntries.push(entry.name + '/');
-    else out.push(rec);
+    if (rec !== 'not-a-skill') {
+      out.push(rec);
+      continue;
+    }
+    // A category folder (skills/<group>/<skill>/SKILL.md): only recursive readers find what's inside.
+    const grouped = loc.recursiveReaders?.length && entry.isDirectory() ? await scanGroup(entryPath, entry.name, loc, opts, 3) : [];
+    if (grouped.length) out.push(...grouped);
+    else loc.ignoredEntries.push(entry.name + '/');
   }
   loc.skillCount = out.length;
+  return out;
+}
+
+async function scanGroup(dir: string, group: string, loc: ResolvedLocation, opts: DiscoverOptions, depth: number): Promise<SkillRecord[]> {
+  const out: SkillRecord[] = [];
+  const sub = await fs.readdir(dir, { withFileTypes: true }).catch(() => [] as Dirent[]);
+  for (const s of sub) {
+    if (s.name.startsWith('.') || !s.isDirectory()) continue;
+    const p = path.join(dir, s.name);
+    const rec = await readSkill(p, s.name, loc, { readOnly: loc.readOnly, readOnlyReason: loc.readOnlyReason }, opts).catch(() => 'not-a-skill' as const);
+    if (rec !== 'not-a-skill') out.push({ ...rec, group, visibleTo: rec.visibleTo.filter((r) => loc.recursiveReaders!.includes(r)) });
+    else if (depth > 1) out.push(...(await scanGroup(p, `${group}/${s.name}`, loc, opts, depth - 1)));
+  }
   return out;
 }
 
@@ -370,7 +419,7 @@ export function annotateConflicts(skills: SkillRecord[], adapters: ProviderAdapt
     const byName = new Map<string, SkillRecord[]>();
     for (const s of visible) {
       const loc = locById.get(s.locationId);
-      const ns = a.namespacesNested && loc?.origin === 'nested' ? `${loc.appliesTo}:` : '';
+      const ns = loc?.namespace ? `${loc.namespace}:` : a.namespacesNested && loc?.origin === 'nested' ? `nested/${loc.appliesTo}:` : '';
       const list = byName.get(ns + s.name) ?? [];
       list.push(s);
       byName.set(ns + s.name, list);
@@ -440,6 +489,10 @@ function addIssueOnce(s: SkillRecord, issue: Issue) {
 
 export async function discover(ctx: DiscoveryContext, adapters: ProviderAdapter[], opts: DiscoverOptions = {}): Promise<DiscoveryResult> {
   if (opts.monorepo) ctx = await expandContext(ctx, opts.monorepo);
+  if (opts.plugins) {
+    const roots = await claudePluginSkillRoots({ homeDir: ctx.homeDir, workspaceFolders: ctx.workspaceFolders, platform: ctx.platform, pluginsRoot: opts.plugins.pluginsRoot }).catch(() => []);
+    ctx = { ...ctx, claudePlugins: roots };
+  }
   const locations = resolveLocations(ctx, adapters, opts);
   const perLocation = await Promise.all(locations.map((l) => scanLocation(l, opts, ctx)));
   const skills = perLocation.flat();
@@ -454,5 +507,15 @@ export async function discover(ctx: DiscoveryContext, adapters: ProviderAdapter[
       }),
   );
   const providers = annotateConflicts(skills, adapters, locations);
+  const nameOf = (id: string) => adapters.find((a) => a.id === id)?.displayName ?? id;
+  for (const s of skills.filter((x) => x.group)) {
+    const loc = locations.find((l) => l.id === s.locationId)!;
+    const others = loc.readers.filter((r) => !loc.recursiveReaders?.includes(r));
+    s.issues.push({
+      severity: others.length ? 'warning' : 'info',
+      code: 'in-category-folder',
+      message: `Inside the category folder "${s.group}/": only ${s.visibleTo.map(nameOf).join(', ') || 'no agent'} finds it${others.length ? `; ${others.map(nameOf).join(', ')} only read${others.length === 1 ? 's' : ''} skills directly in ${loc.label}` : ''}.`,
+    });
+  }
   return { scannedAt: new Date().toISOString(), context: ctx, locations, skills, providers };
 }

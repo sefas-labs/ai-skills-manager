@@ -5,7 +5,7 @@ import type { ViewSkill } from '../shared/protocol';
 import { render } from './main';
 import { persisted, save, send, ui } from './store';
 import { button, clip, h, icon, svg } from './dom';
-import { agentColor, isHost, providerName, short, shown, swatch } from './agents';
+import { agentColor, isHost, providerName, qname, short, shown, swatch } from './agents';
 import { emptyTab, inTab, selectSkill } from './skills';
 
 export type MapScope = 'project' | 'global';
@@ -31,7 +31,7 @@ export function coverage(scope: MapScope): CoverageRow[] {
   const s = ui.state!;
   const agents = shown();
   const byName = new Map<string, ViewSkill[]>();
-  for (const sk of inTab(scope)) byName.set(sk.name, [...(byName.get(sk.name) ?? []), sk]);
+  for (const sk of inTab(scope)) byName.set(qname(sk), [...(byName.get(qname(sk)) ?? []), sk]);
   const targets = s.locations.filter((l) => !l.readOnly && l.scope !== 'admin' && !l.origin && (scope === 'project' ? l.scope === 'workspace' : l.scope === 'global'));
   return [...byName.entries()]
     .map(([name, copies]) => {
@@ -213,7 +213,7 @@ export function flowDiagram(scope: MapScope): Node {
   skills.forEach((k) => {
     const dup = k.issues.some((i) => i.code.startsWith('duplicate:'));
     const reached = agents.filter((a) => k.visibleTo.includes(a.id)).length;
-    node(`s:${k.id}`, clip(k.name, 26), `${k.name}\n${reached ? `Used by ${agents.filter((a) => k.visibleTo.includes(a.id)).map((a) => a.displayName).join(', ')}` : 'No installed agent uses it'}${dup ? '\nSame name in another folder' : ''}`, `skill ${dup ? 'dup' : ''} ${reached ? '' : 'orphan'}`, () => selectSkill(k.id));
+    node(`s:${k.id}`, clip(qname(k), 26), `${qname(k)}\n${reached ? `Used by ${agents.filter((a) => k.visibleTo.includes(a.id)).map((a) => a.displayName).join(', ')}` : 'No installed agent uses it'}${dup ? '\nSame name in another folder' : ''}`, `skill ${dup ? 'dup' : ''} ${reached ? '' : 'orphan'}`, () => selectSkill(k.id));
   });
 
   const legend = h(

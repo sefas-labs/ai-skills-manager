@@ -82,6 +82,13 @@ const home = (ctx: DiscoveryContext, rel: string): ReadLocation => ({
   scope: 'global',
 });
 
+/** Claude Code's managed settings directory + `.claude/skills` (enterprise skills, highest precedence). */
+const CLAUDE_MANAGED_SKILLS: Record<string, string> = {
+  darwin: '/Library/Application Support/ClaudeCode/.claude/skills',
+  linux: '/etc/claude-code/.claude/skills',
+  win32: 'C:\\Program Files\\ClaudeCode\\.claude\\skills',
+};
+
 export const claudeCode: ProviderAdapter = {
   id: 'claude-code',
   displayName: 'Claude Code',
@@ -97,6 +104,10 @@ export const claudeCode: ProviderAdapter = {
     ...ws(ctx, '.claude/skills'),
     ...parents(ctx, '.claude/skills'),
     ...nested(ctx, '.claude/skills'),
+    // ✅ 2026-10-19 (skills + managed-settings docs): `.claude/skills` inside the managed settings directory.
+    { path: CLAUDE_MANAGED_SKILLS[ctx.platform] ?? CLAUDE_MANAGED_SKILLS.linux, scope: 'admin', readOnly: true, readOnlyReason: 'Deployed by your organization (Claude Code managed settings).' },
+    // ✅ 2026-10-19: skills of enabled plugins (namespaced `<plugin>:<skill>`), resolved in plugins.ts.
+    ...(ctx.claudePlugins ?? []),
   ],
 };
 
@@ -104,6 +115,8 @@ export const cursor: ProviderAdapter = {
   id: 'cursor',
   displayName: 'Cursor',
   docsUrl: 'https://cursor.com/docs/skills',
+  // ✅ 2026-10-19: "Cursor walks the skills root recursively and picks up any SKILL.md it finds".
+  recursiveRoots: true,
   disableHint: 'Cursor has no per-skill toggle; `disable-model-invocation: true` makes a skill load only via /skill-name.',
   readLocations: (ctx) => [
     ...ws(ctx, '.agents/skills'),

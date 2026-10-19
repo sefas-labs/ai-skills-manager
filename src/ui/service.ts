@@ -102,6 +102,7 @@ export class SkillsService implements vscode.Disposable {
       extraLocations: extra,
       workspaceReadOnlyReason: vscode.workspace.isTrusted ? undefined : 'Workspace is not trusted (Restricted Mode).',
       monorepo: { parents: cfg.get<boolean>('scanParentFolders', true), nested: cfg.get<boolean>('scanNestedFolders', true) },
+      plugins: cfg.get<boolean>('scanPlugins', true) ? { pluginsRoot: process.env.CLAUDE_CODE_PLUGIN_CACHE_DIR } : undefined,
     };
   }
 
@@ -231,6 +232,8 @@ export class SkillsService implements vscode.Disposable {
       readOnly: s.readOnly,
       readOnlyReason: s.readOnlyReason,
       managed: s.managed,
+      namespace: s.namespace,
+      group: s.group,
       contentId: s.contentId,
       source: s.source
         ? { url: s.source.source.url, ref: s.source.source.ref, commit: s.source.source.commit, installedAt: s.source.installedAt }

@@ -413,3 +413,4 @@ details.merges[open] > summary { margin-bottom: 8px; }
 .chip.ok-chip { background: color-mix(in srgb, var(--on) 22%, transparent); color: var(--vscode-foreground); }
 .cat-note { margin-top: 14px; }
 @media (max-width: 640px) { .cat-grid { grid-template-columns: 1fr; } }
+.ns { color: var(--muted); font-weight: 400; }

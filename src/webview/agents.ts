@@ -40,6 +40,8 @@ export function agentPill(id: string, on: boolean, label = providerName(id)): No
 
 export const providerName = (id: string) => ui.state?.providers.find((p) => p.id === id)?.displayName ?? (id === 'custom' ? 'Custom' : id);
 
+/** How the skill is invoked: plugin skills are `<plugin>:<name>`. Same qualified name = same skill identity. */
+export const qname = (s: { name: string; namespace?: string }) => (s.namespace ? `${s.namespace}:${s.name}` : s.name);
 export const fmtBytes = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
 
 export const problems = (s: ViewSkill) => s.issues.filter((i) => i.severity !== 'info');

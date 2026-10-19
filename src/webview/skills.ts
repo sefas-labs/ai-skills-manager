@@ -5,7 +5,7 @@ import type { ViewSkill } from '../shared/protocol';
 import { render } from './main';
 import { type SkillsTab, busy, persisted, save, send, ui } from './store';
 import { type Child, button, chip, h, icon, select, sevIcon, skeleton } from './dom';
-import { agentDots, agentPill, fmtDate, problems, providerName, short, shortId, shown } from './agents';
+import { agentDots, agentPill, fmtDate, problems, providerName, qname, short, shortId, shown } from './agents';
 import { scrollToMerges } from './overview';
 
 /** Issues of an installed skill, each with its fix button (or a pointer to edit by hand). */
@@ -114,7 +114,8 @@ export function rowChips(sk: ViewSkill): Child[] {
   return [
     sk.scope === 'admin' ? chip('admin', 'scope-admin') : null,
     sk.isSymlink ? chip('link', 'subtle', `→ ${sk.realDir}`) : null,
-    sk.managed === 'synced' ? chip('claude.ai', 'subtle', 'Synced from claude.ai (read-only)') : sk.readOnly ? chip('read-only', 'subtle', sk.readOnlyReason) : null,
+    sk.namespace ? chip('plugin', 'subtle', sk.readOnlyReason) : sk.managed === 'synced' ? chip('claude.ai', 'subtle', 'Synced from claude.ai (read-only)') : sk.readOnly ? chip('read-only', 'subtle', sk.readOnlyReason) : null,
+    sk.group ? chip(`${sk.group}/`, 'subtle', 'Inside a category folder: only Cursor walks skill folders recursively') : null,
     sk.update?.status === 'update-available' ? chip('update', 'update', 'A newer version is available on GitHub') : null,
   ];
 }
@@ -133,7 +134,7 @@ export function skillRow(sk: ViewSkill, child: boolean): Node {
     child
       ? h('div', { class: 'row-head' }, worst ? sevIcon(worst) : null, h('span', { class: 'mono loc' }, sk.locationLabel), ...rowChips(sk), agentDots(sk.visibleTo))
       : [
-          h('div', { class: 'row-head' }, worst ? sevIcon(worst) : null, h('span', { class: 'name' }, sk.name), ...rowChips(sk)),
+          h('div', { class: 'row-head' }, worst ? sevIcon(worst) : null, h('span', { class: 'name' }, sk.namespace ? h('span', { class: 'ns' }, `${sk.namespace}:`) : null, sk.name), ...rowChips(sk)),
           sk.description ? h('div', { class: 'desc' }, sk.description) : h('div', { class: 'desc muted' }, 'No description'),
           h('div', { class: 'row-foot' }, h('span', { class: 'mono small muted loc' }, sk.locationLabel), agentDots(sk.visibleTo)),
         ],
@@ -175,7 +176,7 @@ export function skillsView(t: SkillsTab): Node {
     const items = filtered(t);
     // Same name in several folders → one expandable group (see "Copies" in the ui.detail).
     const groups = new Map<string, ViewSkill[]>();
-    for (const sk of items) groups.set(sk.name, [...(groups.get(sk.name) ?? []), sk]);
+    for (const sk of items) groups.set(qname(sk), [...(groups.get(qname(sk)) ?? []), sk]);
     listEl.replaceChildren(
       ...(items.length
         ? [...groups.values()].map((copies) => (copies.length === 1 ? skillRow(copies[0], false) : groupRows(copies)))
@@ -242,7 +243,7 @@ export function syncedNotice(): Node | null {
       ? h('p', null, 'Your current account ', h('span', { class: 'mono' }, shortId(loc.activeSyncBucket.bucket)), ` — synced ${fmtDate(loc.activeSyncBucket.lastSynced)}. These are the skills listed.`)
       : null,
     loc.skippedSyncedBuckets!.map((b) =>
-      h('p', null, 'Other account ', h('span', { class: 'mono' }, shortId(b.bucket)), ` — last synced ${fmtDate(b.lastSynced)}, not loaded: `, h('span', { class: 'mono' }, b.skills.join(', '))),
+      h('p', null, 'Other account ', h('span', { class: 'mono' }, shortId(b.bucket)), ` — last synced ${fmtDate(b.lastSynced)}, not loaded: `, h('span', { class: 'mono' }, b.skills.join(', ')), ' ', button('Move to backup…', () => send({ type: 'archiveSynced', bucket: b.bucket }), { kind: 'link', title: 'Clean up this leftover folder (recoverable from the backup folder)' })),
     ),
     h('p', { class: 'muted small' }, 'Same names in both folders (docs, pdf…) are the same claude.ai skills downloaded once per account — that is why they looked duplicated. Nothing to fix: Claude Code manages this folder and uses the old one again if you sign in with that account.'),
   );
@@ -250,7 +251,7 @@ export function syncedNotice(): Node | null {
 
 /** Every folder that has a skill with this name, and a way to make one of them the version agents use. */
 export function copiesSection(sk: ViewSkill): Node | null {
-  const copies = ui.state!.skills.filter((x) => x.name === sk.name);
+  const copies = ui.state!.skills.filter((x) => qname(x) === qname(sk));
   if (copies.length < 2) return null;
   const allSame = copies.every((c) => c.contentId && c.contentId === copies[0].contentId);
   const working = busy.has('chooseCopy');
@@ -325,7 +326,7 @@ export function skillDetail(sk: ViewSkill): Node {
   return h(
     'div',
     null,
-    h('div', { class: 'detail-head' }, h('h2', null, sk.name), h('div', { class: 'actions' }, button('Open SKILL.md', () => send({ type: 'openSkillFile', skillId: sk.id }), { kind: 'primary' }), button('Reveal', () => send({ type: 'reveal', skillId: sk.id })), button('Copy path', () => send({ type: 'copyPath', skillId: sk.id })), sk.scope !== 'workspace' ? button('Add to project…', () => send({ type: 'addToProject', skillId: sk.id }), { kind: 'primary', disabled: busy.has('addToProject'), title: 'Copy this skill into a skills folder of the open project' }) : null, button('Copy / Move…', () => send({ type: 'copyMove', skillId: sk.id }), { title: 'Copy or move to another skills folder; shows which agents gain or lose it first' }), button('Remove…', () => send({ type: 'uninstall', skillId: sk.id }), { kind: 'danger', disabled: sk.readOnly, title: sk.readOnly ? sk.readOnlyReason : 'Remove this skill (asks for confirmation)' }))),
+    h('div', { class: 'detail-head' }, h('h2', null, sk.namespace ? h('span', { class: 'ns' }, `${sk.namespace}:`) : null, sk.name), h('div', { class: 'actions' }, button('Open SKILL.md', () => send({ type: 'openSkillFile', skillId: sk.id }), { kind: 'primary' }), button('Reveal', () => send({ type: 'reveal', skillId: sk.id })), button('Copy path', () => send({ type: 'copyPath', skillId: sk.id })), sk.scope !== 'workspace' ? button('Add to project…', () => send({ type: 'addToProject', skillId: sk.id }), { kind: 'primary', disabled: busy.has('addToProject'), title: 'Copy this skill into a skills folder of the open project' }) : null, button('Copy / Move…', () => send({ type: 'copyMove', skillId: sk.id }), { title: 'Copy or move to another skills folder; shows which agents gain or lose it first' }), button('Remove…', () => send({ type: 'uninstall', skillId: sk.id }), { kind: 'danger', disabled: sk.readOnly, title: sk.readOnly ? sk.readOnlyReason : 'Remove this skill (asks for confirmation)' }))),
     sk.description ? h('p', null, sk.description) : null,
     h('h3', null, 'Available to'),
     h('div', { class: 'vis big' }, shown().map((p) => agentPill(p.id, sk.visibleTo.includes(p.id)))),

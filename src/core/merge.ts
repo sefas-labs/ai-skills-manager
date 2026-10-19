@@ -55,7 +55,7 @@ export async function mergeSuggestions(
   const groups = new Map<string, SkillRecord[]>();
   for (const s of skills) {
     const loc = locById.get(s.locationId);
-    if (!loc || loc.origin === 'nested' || s.issues.some((i) => i.code === 'broken-symlink')) continue;
+    if (!loc || loc.origin === 'nested' || loc.namespace || s.issues.some((i) => i.code === 'broken-symlink')) continue;
     const key = `${s.scope === 'workspace' ? `ws:${loc.workspaceFolder ?? ''}` : 'global'}|${s.name}`;
     groups.set(key, [...(groups.get(key) ?? []), s]);
   }

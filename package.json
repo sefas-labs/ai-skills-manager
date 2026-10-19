@@ -364,6 +364,11 @@
           "type": "boolean",
           "default": true,
           "description": "Scan .claude/skills, .agents/skills and .cursor/skills folders nested inside the workspace (monorepos). Bounded: skips hidden, node_modules and build folders, max depth 6."
+        },
+        "skillsManager.scanPlugins": {
+          "type": "boolean",
+          "default": true,
+          "description": "List the skills of enabled Claude Code plugins (read-only; ~/.claude/plugins/installed_plugins.json). They are namespaced as <plugin>:<skill>, so they never clash with your own skills."
         }
       }
     }

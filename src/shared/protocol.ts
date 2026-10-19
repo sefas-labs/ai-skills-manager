@@ -26,6 +26,10 @@ export interface ViewSkill {
   readOnlyReason?: string;
   /** Managed sub-folder it lives in (e.g. 'synced' for claude.ai). */
   managed?: string;
+  /** Invoked as `<namespace>:<name>` (Claude Code plugin skills). */
+  namespace?: string;
+  /** Category folder (skills/<group>/<skill>) — only Cursor finds it. */
+  group?: string;
   /** Content fingerprint (only when another folder has the same name). */
   contentId?: string;
   source?: { url: string; ref: string; commit: string; installedAt: string };
@@ -173,6 +177,7 @@ export type WebviewToHost =
   | { type: 'catalogList'; sourceId: string; force?: boolean }
   | { type: 'catalogSearch'; query: string }
   | { type: 'openUrl'; url: string }
+  | { type: 'archiveSynced'; bucket: string }
   | { type: 'merge'; suggestionId: string; action: 'apply' | 'compare' | 'unify'; skillId?: string }
   | { type: 'fix'; skillId: string; fixId?: string }
   | { type: 'update'; skillId: string }

@@ -133,10 +133,15 @@ export async function confirmAndUpdate(service: SkillsService, skillId: string):
 
     for (;;) {
       const action = localEdits.length ? 'Replace Local Edits and Update' : 'Update';
-      const choice = await vscode.window.showInformationMessage(`Update "${s.name}"?`, { modal: true, detail }, action, 'Compare Files…');
+      const viaGh = source.origin === 'gh-skill' ? ['Update with gh skill…'] : [];
+      const choice = await vscode.window.showInformationMessage(`Update "${s.name}"?`, { modal: true, detail }, action, 'Compare Files…', ...viaGh);
       if (choice === 'Compare Files…') {
         await compareFiles(s.dir, p);
         continue;
+      }
+      if (choice === 'Update with gh skill…') {
+        openGhUpdate(s.dirName, path.dirname(s.dir));
+        return false;
       }
       if (choice !== action) return false;
       break;
@@ -159,6 +164,15 @@ export async function confirmAndUpdate(service: SkillsService, skillId: string):
   } finally {
     if (preview) await cleanupStaging([preview.staged]);
   }
+}
+
+/** Types (doesn't run) `gh skill update` for this skill in a terminal, keeping gh's own provenance tracking. */
+function openGhUpdate(skill: string, dir: string): void {
+  const q = (v: string) => (process.platform === 'win32' ? `"${v.replace(/"/g, '""')}"` : `'${v.replace(/'/g, `'\\''`)}'`);
+  const term = vscode.window.createTerminal({ name: 'gh skill update' });
+  term.show();
+  term.sendText(`gh skill update ${q(skill)} --dir ${q(dir)}`, false);
+  vscode.window.showInformationMessage('The gh command is typed in the terminal — review it and press Enter to run it.');
 }
 
 async function compareFiles(skillDir: string, p: UpdatePreview): Promise<void> {

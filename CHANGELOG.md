@@ -84,6 +84,11 @@ Bugs corregidos:
 - Tests del webview con jsdom en `npm run test:smoke`: todas las pestañas, acciones principales, host antiguo, scroll y catálogo.
 - El webview se dividió en módulos (`store`, `dom`, `agents`, `skills`, `overview`, `map`, `install`, `catalog`, `main`).
 - CI en GitHub Actions: typecheck, tests y smoke en Linux y macOS, más el VSIX como artefacto.
+- **Skills de plugins de Claude Code** (solo lectura): se leen de `~/.claude/plugins/installed_plugins.json` y de `enabledPlugins` (managed > local > project > user; si nadie lo fija, decide `defaultEnabled`). Se muestran como `<plugin>:<skill>` y nunca chocan con los tuyos. Ajuste: `skillsManager.scanPlugins`.
+- **Skills enterprise de Claude Code**: `.claude/skills` dentro del directorio de managed settings (macOS, Linux/WSL y Windows). Son de solo lectura y tienen la precedencia más alta.
+- **Cursor recorre carpetas de categoría** (`skills/<grupo>/<skill>/SKILL.md`). Esos skills se listan con el chip `<grupo>/`, y si otros agentes leen la misma carpeta se avisa de que ellos no los ven.
+- Actualizar un skill de `gh skill` ofrece **Update with gh skill…**: escribe `gh skill update <skill> --dir <carpeta>` en una terminal sin ejecutarlo.
+- **Move to backup…** para los skills sincronizados de otra cuenta de claude.ai. Nunca toca la cuenta activa.
 - `npm run test:e2e`: ejecuta la extensión dentro de VS Code o Cursor reales, con un perfil temporal y un proxy local.
 
 ## 0.1.0 — 2026-10-18

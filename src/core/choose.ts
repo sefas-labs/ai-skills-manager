@@ -34,7 +34,8 @@ export function planChoose(chosen: SkillRecord, skills: SkillRecord[], locations
   const chosenLocation = locById.get(chosen.locationId)!;
   const others: OtherCopy[] = [];
   for (const s of skills) {
-    if (s.id === chosen.id || s.name !== chosen.name || pathKey(s.realDir) === pathKey(chosen.realDir)) continue;
+    // Namespaced (plugin) skills are different skills even with the same name.
+    if (s.id === chosen.id || s.name !== chosen.name || s.namespace !== chosen.namespace || pathKey(s.realDir) === pathKey(chosen.realDir)) continue;
     const location = locById.get(s.locationId);
     if (!location || s.issues.some((i) => i.code === 'broken-symlink')) continue;
     const readOnly = s.readOnly || location.readOnly || !!s.managed;
