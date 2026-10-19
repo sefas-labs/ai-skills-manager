@@ -69,3 +69,23 @@ test('digit-only values that would lose precision stay strings (e.g. SHAs)', () 
   assert.equal(r.data['d'], 3.5);
   assert.equal(r.data['e'], '007');
 });
+
+test('multi-line plain and quoted scalars (indented continuation lines) are folded like YAML', () => {
+  const r = parseFrontmatter(
+    '---\nname: tao\ndescription: Performs deep Root Cause Analysis on\n  image-evidence-driven experiments.\n\n  Second paragraph.\nnext: "quoted that\n  continues here"\nsingle: \'one\n  two\'\n---\nBody\n',
+  );
+  assert.equal(r.error, undefined);
+  assert.equal(r.data['description'], 'Performs deep Root Cause Analysis on image-evidence-driven experiments.\nSecond paragraph.');
+  assert.equal(r.data['next'], 'quoted that continues here');
+  assert.equal(r.data['single'], 'one two');
+  assert.equal(r.data['name'], 'tao');
+  // Like YAML: a continuation line can't hold another "key: value".
+  assert.ok(parseFrontmatter('---\ndescription: Foo\n  name: bar\n---\n').error);
+});
+
+test('a plain scalar can start on the line after "key:" (as Vercel skills do)', () => {
+  const r = parseFrontmatter('---\nname: x\ndescription:\n  React composition patterns that scale.\n  Use when refactoring.\nmetadata:\n  a: b\n---\n');
+  assert.equal(r.error, undefined);
+  assert.equal(r.data['description'], 'React composition patterns that scale. Use when refactoring.');
+  assert.deepEqual(r.data['metadata'], { a: 'b' });
+});

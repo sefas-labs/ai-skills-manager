@@ -16,7 +16,7 @@ export interface CatalogSource {
   blurb: string;
 }
 
-/** Verified to exist and contain SKILL.md folders on 2026-10-19 (counts as of that day). */
+/** Verified to exist and contain SKILL.md folders on 2026-10-19 (counts as of that day; NVIDIA/skills on 2026-10-19 too: Apache-2.0, 418 SKILL.md). */
 export const FEATURED_SOURCES: CatalogSource[] = [
   { id: 'anthropics/skills', owner: 'anthropics', repo: 'skills', title: 'Anthropic', blurb: 'Anthropic’s public Agent Skills (documents, design, development) — ~20 skills.' },
   { id: 'openai/skills', owner: 'openai', repo: 'skills', title: 'OpenAI', blurb: 'Skills catalog for Codex — ~40 skills.' },
@@ -24,6 +24,7 @@ export const FEATURED_SOURCES: CatalogSource[] = [
   { id: 'vercel-labs/agent-skills', owner: 'vercel-labs', repo: 'agent-skills', title: 'Vercel', blurb: 'Vercel’s collection of agent skills — ~10 skills.' },
   { id: 'microsoft/skills', owner: 'microsoft', repo: 'skills', title: 'Microsoft', blurb: 'Skills to ground coding agents in Microsoft SDKs — 200+ skills.' },
   { id: 'huggingface/skills', owner: 'huggingface', repo: 'skills', title: 'Hugging Face', blurb: 'Skills for the Hugging Face ecosystem — ~25 skills.' },
+  { id: 'NVIDIA/skills', owner: 'NVIDIA', repo: 'skills', title: 'NVIDIA', blurb: 'NVIDIA’s skills for CUDA, RAG, robotics, simulation and Physical AI — 400+ skills.' },
   { id: 'obra/superpowers', owner: 'obra', repo: 'superpowers', title: 'Superpowers', blurb: 'An agentic development methodology packaged as skills — ~15 skills.' },
 ];
 
@@ -68,7 +69,7 @@ async function describe(
   const hit = cache.get(sha);
   if (hit) return hit;
   try {
-    const buf = await client.file(at.owner, at.repo, at.ref, path, 256 * 1024);
+    const buf = await client.file(at.owner, at.repo, at.ref, path, 1024 * 1024); // same limit as install/discovery
     const fm = parseFrontmatter(Buffer.from(buf).toString('utf8')).data;
     const v = {
       name: typeof fm['name'] === 'string' ? (fm['name'] as string) : undefined,

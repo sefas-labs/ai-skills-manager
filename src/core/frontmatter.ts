@@ -166,6 +166,17 @@ function parseMap(lines: string[], start: number, indent: number): [Record<strin
       while (j < lines.length && isBlank(lines[j])) j++;
       if (j < lines.length && indentOf(lines[j]) > indent) {
         const childIndent = indentOf(lines[j]);
+        const isEntry = /^\s*- /.test(lines[j]) || /^\s*-$/.test(lines[j]) || KEY_LINE.test(lines[j]);
+        if (!isEntry && !/:\s/.test(stripComment(lines[j]))) {
+          // `key:` followed by an indented plain scalar on the next lines (folded like YAML).
+          let k = j;
+          const parts: string[] = [];
+          while (k < lines.length && (isBlank(lines[k]) || indentOf(lines[k]) > indent)) parts.push(stripComment(lines[k++].trim()));
+          while (parts.length && parts[parts.length - 1] === '') parts.pop();
+          out[key] = parts.reduce((acc, p) => (p === '' ? acc + '\n' : acc === '' || acc.endsWith('\n') ? acc + p : `${acc} ${p}`), '');
+          i = k;
+          continue;
+        }
         if (/^\s*- /.test(lines[j]) || /^\s*-$/.test(lines[j])) {
           const [list, next] = parseList(lines, j, childIndent);
           out[key] = list;
@@ -217,7 +228,25 @@ function parseMap(lines: string[], start: number, indent: number): [Record<strin
       else if (chomp === 'clip') value = value.replace(/\n+$/, '') + '\n';
       out[key] = value;
     } else {
-      out[key] = parseScalar(rest);
+      // Plain or quoted scalars may continue on more-indented lines (YAML folds them with spaces).
+      const cont: string[] = [];
+      let j = i;
+      while (j < lines.length && (isBlank(lines[j]) || indentOf(lines[j]) > indent)) j++;
+      while (j > i && isBlank(lines[j - 1])) j--;
+      for (let k = i; k < j; k++) cont.push(lines[k].trim());
+      if (cont.length === 0) {
+        out[key] = parseScalar(rest);
+      } else {
+        const quote = rest[0] === '"' || rest[0] === "'" ? rest[0] : '';
+        if (!quote && cont.some((c) => /:\s/.test(stripComment(c)) || /^[-?:]\s/.test(c))) {
+          throw new Error(`Unexpected indentation at frontmatter line ${i + 1}.`);
+        }
+        const parts = [quote ? rest : stripComment(rest), ...cont.map((c) => (quote ? c : stripComment(c)))];
+        // Blank lines become newlines; other line breaks fold to a single space.
+        const folded = parts.reduce((acc, p) => (p === '' ? acc + '\n' : acc === '' || acc.endsWith('\n') ? acc + p : `${acc} ${p}`), '');
+        out[key] = quote ? parseScalar(folded) : folded;
+        i = j;
+      }
     }
   }
   return [out, i];

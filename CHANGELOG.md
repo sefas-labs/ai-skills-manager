@@ -76,7 +76,7 @@ Bugs corregidos:
   - Esqueletos de carga. En pantallas anchas se abre el primer skill automáticamente.
   - Puntos de corte para paneles estrechos (980, 820, 640 y 460 px) y bordes reforzados en alto contraste.
 - **Catálogo de skills** (Install → *Browse catalog*):
-  - **Colecciones destacadas**, verificadas el 19-oct-2026: Anthropic, OpenAI, Awesome Copilot, Vercel, Microsoft, Hugging Face y Superpowers.
+  - **Colecciones destacadas**, verificadas el 19-oct-2026: Anthropic, OpenAI, Awesome Copilot, Vercel, Microsoft, Hugging Face, NVIDIA y Superpowers.
   - Cada colección se lista al abrirla con 3 llamadas a la API más la descarga de los SKILL.md desde raw. Las descripciones se cachean en disco por blob SHA, así que volver a listar solo cuesta esas 3 llamadas.
   - **Search GitHub** busca en todos los repos públicos con la Code Search API, como `gh skill search`, y requiere sesión. Ordena primero las coincidencias en el nombre.
   - Marca lo que ya tienes instalado (mismo origen o mismo nombre).
@@ -105,6 +105,9 @@ Bugs corregidos:
 - Tests de punta a punta de los flujos con modales (`test/smoke/flows.test.mjs`): instalar, actualizar, arreglar, apagar por agente, quitar y fusionar, con la extensión empaquetada, modales confirmados y GitHub simulado.
 - Corregido: dos backups de carpetas con el mismo nombre en el mismo milisegundo chocaban (`ENOTEMPTY`), lo que dejaba un merge a medias. Los nombres de backup ahora llevan un sufijo aleatorio.
 - Corregido: dos escrituras simultáneas del lock (dos acciones seguidas) competían por el mismo archivo temporal. Ahora se serializan.
+- Catálogo: añadida la colección **NVIDIA** (`NVIDIA/skills`, Apache-2.0, 418 skills).
+- Corregido: el parser del frontmatter rechazaba valores YAML válidos repartidos en varias líneas indentadas, tanto sin comillas como entre comillas, y los que empiezan en la línea siguiente a `description:`. Esos skills (41 de NVIDIA y 2 de Vercel) salían sin descripción y **no se podían instalar**, porque el frontmatter se daba por inválido. Ahora se leen bien las 1.171 skills de las 8 colecciones.
+- Corregido: el catálogo cortaba los SKILL.md de más de 256 KB. Ahora usa el mismo límite de 1 MB que la instalación.
 - `npm run test:e2e`: ejecuta la extensión dentro de VS Code o Cursor reales, con un perfil temporal y un proxy local.
 
 ## 0.1.0 — 2026-10-18

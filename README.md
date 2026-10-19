@@ -22,7 +22,7 @@ Screenshots are in `docs/images/`.
   - folders without a `SKILL.md`.
 - **Merge suggestions for duplicates:** when the same skill sits in several folders of the same scope, it suggests the smallest set of copies that still reaches every installed agent. *Merge* moves the redundant copies to the backup folder, *Use this version* makes differing copies identical, and *Compare* opens a file-by-file diff.
 - **One-click fixes:** *Fix…* next to each fixable problem (or *Fix all*): set `name` to the folder name or rename the folder, add a missing `name`/`description`/frontmatter, rename `skill.md` to `SKILL.md`, remove a broken link. The exact change is shown first, SKILL.md edits are minimal one-line edits, and a backup is kept.
-- **Skills catalog:** browse well-known collections (Anthropic, OpenAI, Awesome Copilot, Vercel, Microsoft, Hugging Face, Superpowers) or search all of GitHub (sign-in required), see what you already have, and install through the same review flow.
+- **Skills catalog:** browse well-known collections (Anthropic, OpenAI, Awesome Copilot, Vercel, Microsoft, Hugging Face, NVIDIA, Superpowers) or search all of GitHub (sign-in required), see what you already have, and install through the same review flow.
 - **Install from GitHub** (repository, folder, `…/blob/…/SKILL.md` or `owner/repo`):
   1. Analyzes the repository and rejects anything that isn't a skill, with a hint when it looks like a plugin or an MCP server.
   2. Lets you choose which skills to install.
