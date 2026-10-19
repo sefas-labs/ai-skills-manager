@@ -87,7 +87,7 @@ No objetivo (por ahora): quien usa un solo agente y está contento con su UI nat
 | Instalar desde URL de GitHub (repo, carpeta, `blob/.../SKILL.md`, `owner/repo`) | ✅ (probado contra GitHub simulado y contra `anthropics/skills` real, 18-oct-2026) |
 | Desinstalar con seguridad (backup recuperable; symlinks: solo el enlace) | ✅ |
 | Abrir ubicación y revisar archivos | ✅ |
-| Funcionar en VS Code / evaluar Cursor | ✅ e2e en VS Code 1.140 y Cursor 3.25.9; ⚠️ falta recorrer los modales a mano (ver C.8) |
+| Funcionar en VS Code / evaluar Cursor | ✅ e2e en VS Code 1.140 y Cursor 3.25.9; ⚠️ falta recorrer los modales a mano (ver C.9) |
 
 Extras que entraron por ser baratos y diferenciales: matriz de visibilidad, duplicados por agente, validación de la spec, inspección de seguridad, procedencia (repo + commit + tree SHA), Workspace Trust.
 
@@ -157,12 +157,12 @@ Correspondencia con los 8 módulos pedidos:
 | Módulo | Dónde | Estado |
 |---|---|---|
 | 1. Discovery Engine | `core/discovery.ts` | ✅ |
-| 2. Provider Adapters | `core/providers/index.ts` | ✅ (4 + carpetas extra por configuración) |
+| 2. Provider Adapters | `core/providers/index.ts`, `core/plugins.ts`, `core/monorepo.ts` | ✅ (4 agentes; carpetas padre, anidadas, plugins y enterprise; extra por configuración) |
 | 3. Installation Manager | `core/installer.ts` | ✅ |
 | 4. Update Manager | `core/updates.ts`, `core/provenance.ts`, `ui/updates.ts` | ✅ v0.2 (tree SHA remoto, diff por blob SHA, procedencia de `gh skill`) |
-| 5. Configuration Manager | `ui/service.ts` (settings de la extensión) | ⚠️ solo settings propios; editar configs de agentes es v0.3+ |
-| 6. Registry / Marketplace | — | 🔜 en curso (catálogo en Install) |
-| 7. Dashboard UI | `ui/dashboard.ts`, `webview/main.ts`, `media/dashboard.css` | ✅ |
+| 5. Configuration Manager | `core/toggles.ts` (on/off por agente), `core/customizations.ts` (inventario) | ✅ toggles por agente; ⚠️ MCP, reglas, subagentes y comandos solo en lectura |
+| 6. Registry / Marketplace | `core/catalog.ts`, `ui/catalog.ts`, `webview/catalog.ts` | ✅ colecciones destacadas + búsqueda en GitHub; instalar pasa por la revisión normal |
+| 7. Dashboard UI | `ui/dashboard.ts`, `src/webview/*`, `media/dashboard.css` | ✅ |
 | 8. Security & Validation | `core/validate.ts`, `core/inspector.ts`, `core/paths.ts` | ✅ |
 
 **Decisiones técnicas:**
@@ -180,20 +180,22 @@ skills-manager/
 ├── src/
 │   ├── extension.ts        activación y comandos
 │   ├── core/               motor sin vscode (testeable en Node)
-│   │   ├── types.ts  frontmatter.ts  validate.ts  paths.ts
-│   │   ├── discovery.ts  lockfile.ts  github.ts  inspector.ts  installer.ts
-│   │   ├── provenance.ts  updates.ts  transfer.ts  monorepo.ts
-│   │   └── providers/index.ts
+│   │   ├── types.ts  frontmatter.ts  validate.ts  paths.ts  hashing.ts
+│   │   ├── discovery.ts  monorepo.ts  plugins.ts  agents.ts  providers/index.ts
+│   │   ├── github.ts  inspector.ts  installer.ts  lockfile.ts  provenance.ts  updates.ts
+│   │   ├── transfer.ts  fixes.ts  merge.ts  choose.ts  toggles.ts
+│   │   └── catalog.ts  customizations.ts
 │   ├── shared/protocol.ts  mensajes host ↔ webview
-│   ├── ui/                 service, tree, dashboard, actions, updates, transfer
-│   └── webview/main.ts     UI del dashboard
-├── media/                  dashboard.css, icon.svg, icon.png
+│   ├── ui/                 service, tree, dashboard, actions, log, updates, transfer, fixes,
+│   │                       merge, choose, toggles, catalog
+│   └── webview/            store, dom, agents, skills, overview, map, config, catalog, install, main
+├── media/                  dashboard.css, icon.svg, icon.png (codicons se copian a dist/ al compilar)
 ├── test/
-│   ├── unit/               frontmatter, paths, validate/github/inspector, discovery
-│   ├── integration/        instalación, actualizaciones y copiar/mover contra GitHub simulado (SHAs como git)
-│   ├── smoke/              carga dist/extension.js con un `vscode` simulado
-│   ├── e2e/                ejecuta la extensión en VS Code / Cursor reales (perfil temporal, proxy local)
+│   ├── unit/ integration/  núcleo en Node (GitHub simulado con SHAs como git, directorios temporales)
+│   ├── smoke/              extensión empaquetada con `vscode` simulado: activación, webview en jsdom, flujos con modales
+│   ├── e2e/                extensión en VS Code / Cursor reales (perfil temporal, proxy local, GitHub real)
 │   └── helpers/
+├── .github/workflows/ci.yml  typecheck + tests + smoke en Linux y macOS, VSIX como artefacto
 ├── scripts/                build.mjs, package-vsix.mjs, run-tests.mjs
 ├── typings/sandbox/        subconjunto de tipos de vscode (solo para entornos sin npm)
 └── docs/                   este documento + capturas
@@ -250,6 +252,9 @@ Para añadir un proveedor basta un objeto nuevo en `providers/index.ts`; discove
 | **Monorepo:** `.agents/skills` en carpetas padre hasta la raíz del repo | | ❓ no documentado | ✅ | ⚠️ ídem |
 | **Monorepo:** `<sub>/.claude/skills` anidado (se carga al trabajar en `<sub>`) | ✅ con namespace `/<sub>:name` | | | ❓ |
 | **Monorepo:** `<sub>/.cursor/skills`, `<sub>/.agents/skills` anidados | | ✅ "anywhere inside your repository" | ❓ no documentado | ❓ |
+| Carpetas de categoría dentro de una raíz (`skills/<grupo>/<skill>`) | ❓ | ✅ "walks the skills root recursively" | ❓ | ❓ |
+| Enterprise: `<managed dir>/.claude/skills` (macOS `/Library/Application Support/ClaudeCode`, Linux/WSL `/etc/claude-code`, Windows `C:\Program Files\ClaudeCode`) | ✅ solo lectura | | | |
+| Plugins: `installed_plugins.json` → `<installPath>/skills` + rutas `skills` del manifiesto; activos según `enabledPlugins` (managed > local > project > user, si no `defaultEnabled`); nombres `<plugin>:<skill>` | ✅ solo lectura | ❓ (Cursor no documenta dónde instala plugins) | | |
 
 Notas del 18-oct-2026:
 - **Synced:** la doc de Claude Code dice `~/.claude/skills/synced/`. En disco (Claude Code 2.1.27x), cada skill está un nivel más abajo, en un bucket por cuenta u organización: `synced/<org>_<cuenta>/<skill>/SKILL.md`, junto a un `manifest.json`. Se aceptan ambos niveles. ⚠️ El nombre del bucket es `<oauthAccount.organizationUuid>_<oauthAccount.accountUuid>` de `~/.claude.json`, observado en esta máquina el 18-oct-2026: el bucket de la cuenta activa se actualizó el 14-oct y el de otra cuenta lleva parado desde el 20-sep. La doc dice que se descarga *"your account's skills"*, así que solo se listan los skills de la cuenta activa y el resto se cuenta como omitido. Que Claude Code ignore los otros buckets está deducido, no documentado. Si se desactiva la sincronización, Claude Code mueve los skills a `~/.claude/skills/.trash/`; como empieza por punto, se ignora.
@@ -383,7 +388,7 @@ Fuentes: [Claude Code](https://code.claude.com/docs/en/skills) · [Cursor](https
 | Escaneo de carpetas anidadas en workspaces grandes | Profundidad máx. 6, 5.000 carpetas, omite ocultas, `node_modules` y carpetas de build, sin seguir symlinks; desactivable | Monorepos más profundos pueden quedar sin cubrir |
 | Rutas de los agentes cambian | Adaptadores con `docsUrl` y fecha de verificación; `extraLocations` como escape | Mantenimiento continuo |
 
-### C.9 Añadido en 0.3 (tras usar la extensión en real)
+### C.8 Añadido en 0.3 (tras usar la extensión en real)
 
 Estas funciones salieron de usar la extensión a diario (18–19 oct 2026):
 
@@ -403,49 +408,47 @@ Estas funciones salieron de usar la extensión a diario (18–19 oct 2026):
 - Reinstalar un VSIX sin recargar la ventana deja el dashboard nuevo hablando con el host viejo. Causó dos "bugs" que no lo eran y motivó el id de build y el canal de log **AI Skills**.
 - Los e2e arrancan un editor limpio, así que no ven ese caso; los smoke y jsdom sí lo cubren.
 
-### C.8 Estado de implementación (v0.2)
+### C.9 Estado de implementación (v0.3, 19-oct-2026)
 
 **Implementado:**
-- Todo lo de B.3.
-- v0.2:
-  - actualizaciones (lock + `gh skill`);
-  - copiar/mover;
-  - monorepos (carpetas padre y anidadas);
-  - lectura de los skills sincronizados de claude.ai en su estructura real.
-- 57 tests unitarios y de integración, 1 smoke test y un e2e en el editor real (`npm run test:e2e`).
-- Empaquetado VSIX: con `vsce` (52 KB) y sin dependencias.
+- **Inventario:**
+  - global, workspace, admin, carpetas padre y anidadas, skills enterprise y de plugins de Claude Code, y carpetas de categoría de Cursor;
+  - skills sincronizados de claude.ai, solo de la cuenta activa.
+- **Diagnóstico:**
+  - validación de la spec, duplicados por agente (las copias idénticas cuentan como información), symlinks rotos;
+  - arreglos automáticos, sugerencias de merge y elegir copia.
+- **GitHub:**
+  - instalar con revisión y actualizar (lock propio y `gh skill`);
+  - catálogo con colecciones destacadas y búsqueda en GitHub;
+  - Add to project, copiar y mover.
+- **Por agente:**
+  - detección de agentes instalados y del editor;
+  - on/off con el mecanismo de cada uno;
+  - pestaña Map de cobertura;
+  - pestaña Config de solo lectura (instrucciones, reglas, subagentes, comandos y MCP).
+- **Calidad:**
+  - 91 tests unitarios y de integración;
+  - 17 smoke: activación, 8 de webview en jsdom y 4 flujos completos con modales;
+  - e2e en el editor real;
+  - CI en Linux y macOS.
 
-**Probado en real (18-oct-2026):**
-- *Núcleo contra GitHub real* (`anthropics/skills`, sin token y con token):
-  - repo completo (20 candidatos, 3 llamadas a la API; las descargas van a `raw.githubusercontent.com`, que no consume rate limit), carpeta `skills/pdf` y URL `blob/…/SKILL.md`;
-  - archivos sin bit de ejecución y entrada en el lock con commit y tree SHA;
-  - reemplazo con backup;
-  - desinstalación de una carpeta (a `backups/`) y de un symlink (el destino queda intacto);
-  - refs con `/` codificadas como `%2F`, aceptadas por la API.
-- *Actualizaciones contra GitHub real:* sobre skills instalados con `gh skill` 2.102.0, el tree SHA guardado por `gh` coincide con el de la API y el diff por blob SHA sale vacío. Un skill fijado (`--pin`) sale como *pinned* sin hacer llamadas.
-- *VS Code 1.140 y Cursor 3.25.9* (`test:e2e`, extensión en desarrollo dentro del editor real):
-  - activación y comandos registrados;
-  - árbol con los skills reales de `~/.claude/skills` (2 propios y 22 sincronizados);
-  - el webview del dashboard carga con la CSP y completa el handshake;
-  - proveedor de auth `github` disponible;
-  - proxy;
-  - comprobación de actualizaciones contra GitHub real (al día y desactualizado) con el indicador en el árbol;
-  - monorepo (raíz del repo y `.cursor/skills` anidado).
-- *VSIX 0.2.0* instalado en Cursor y VS Code con `--install-extension`, en perfiles aislados.
+**Probado en real (VS Code 1.140–1.142, Cursor 3.25.9, macOS):**
+- Escaneo de los skills de esta máquina: 2 propios, 14 sincronizados de la cuenta activa, 8 omitidos de otra cuenta y 32 de plugins (`agent-skills`, `ui-ux-pro-max`).
+- Instalación desde `anthropics/skills` sin token y con token (repo, carpeta, `blob`): sin bits de ejecución, lock, reemplazo con backup y desinstalación de carpeta y de symlink.
+- Comprobación de actualizaciones contra GitHub real, incluidos los metadatos de `gh skill` 2.102.0.
+- Catálogo real (`anthropics/skills`, 20 skills) y búsqueda en GitHub con token.
+- Proxy (`http.proxy`), proveedor de auth `github` en Cursor e instalación del VSIX en ambos editores.
 
-**Pendiente de prueba manual** (requiere clics; no automatizable con `--extensionTestsPath` sin simular modales):
-- Recorrer a mano el flujo de instalación del dashboard (pasos 2–3 y modales), *Update…* (modal y *Compare Files…*), *Copy or Move to…* y *Remove…* en ambos editores.
-- Comprobar que un skill instalado en `~/.cursor/skills` aparece en **Cursor Settings → Rules & Skills** y desaparece al quitarlo.
-- Revisión visual del dashboard en temas claro, oscuro y alto contraste con las nuevas píldoras (*update*) y filas (*nested*, *parent folder*).
-- Proxy con autenticación o con inspección TLS corporativa.
+**Pendiente de prueba manual** (los flujos con modales ya están probados de punta a punta con la extensión empaquetada; falta verlos en el editor):
+- En VS Code y en Cursor, recorrer: catálogo → Install…; Update… y *Compare Files…*; Add to project; Use this copy; Fix; On/off por agente; Remove; Move to backup… (claude.ai); Config → abrir un archivo.
+- Comprobar en Cursor (Settings → Rules & Skills) que un skill instalado o apagado se refleja.
+- Revisar la vista en alto contraste y en paneles de menos de 500 px.
+- Probar un proxy con autenticación.
 
-**Parcial:**
-- No se escanean los skills de **plugins** (Claude/Cursor), la ruta enterprise de Claude Code (`/etc/claude-code/.claude/skills`, etc.) ni los skills aportados por extensiones de VS Code (`chatSkills`).
-- Cursor recorre cada carpeta de skills de forma recursiva; aquí solo el primer nivel.
-- Duplicados entre un skill local y uno sincronizado: Claude Code los separa (`/anthropic-skills:<name>`), pero aquí se avisa igualmente si Cursor o Copilot ven ambos (❓ no se sabe si leen `synced/`).
-- Árboles truncados por GitHub en repos enormes: la instalación avisa; la comprobación de actualizaciones sí recorre nivel a nivel.
-
-**Trabajo futuro:** ver roadmap.
+**Parcial / no cubierto:**
+- MCP, reglas, subagentes y comandos solo en lectura (no se editan).
+- No se cubren: reglas de usuario de Cursor (están en sus settings), prompt files y custom agents de Copilot, `CLAUDE.md` / `AGENTS.md` anidados bajo el workspace, plugins de Cursor y plugins sincronizados de claude.ai (formato no documentado).
+- Solo GitHub. En repos enormes, la instalación avisa del árbol truncado pero no pagina.
 
 ---
 
@@ -453,16 +456,13 @@ Estas funciones salieron de usar la extensión a diario (18–19 oct 2026):
 
 Prioridad = impacto × demanda ÷ dificultad.
 
-| Versión | Contenido | Impacto | Dificultad | Notas |
-|---|---|---|---|---|
-| **0.1** | MVP | — | — | ✅ Verificado en real (ver C.8). Publicar en Open VSX y Marketplace; medir |
-| **0.2** | ✅ **Actualizaciones**: tree SHA guardado vs. remoto, diff de archivos y actualización con backup. Procedencia de `gh skill` | Alto | Baja | Implementado |
-| 0.2 | ✅ Copiar o mover entre carpetas con vista previa de visibilidad | Alto | Baja | Implementado |
-| 0.2 | ✅ Monorepos: carpetas padre y anidadas según la doc de cada agente | Medio | Media | Implementado |
-| 0.2.x | Skills de plugins (solo lectura), ruta enterprise de Claude Code, recorrido recursivo de Cursor | Medio | Media | Verificar rutas exactas antes de implementar |
-| 0.2.x | Notas: `gh skill update` como alternativa en el modal de actualización; leer `~/.agents/.skill-lock.json` solo como pista (es ambiguo por nombre) | Bajo | Baja | |
-| **0.3** | **Habilitar/deshabilitar** por agente: Claude `skillOverrides` (settings.json), Codex `[[skills.config]] enabled=false` (config.toml). En Cursor y Copilot solo se ofrece `disable-model-invocation`, avisando de que **edita el skill**. | Medio | Media | Necesita escribir JSON/TOML con backup |
-| **0.4** | **MCP (solo lectura primero)**: inventario y duplicados entre agentes, secretos **redactados**. Rutas ❓ *por verificar contra la doc oficial antes de implementar*: Claude Code `.mcp.json` / `~/.claude.json`; Cursor `.cursor/mcp.json` / `~/.cursor/mcp.json`; VS Code `.vscode/mcp.json`; Codex `~/.codex/config.toml` `[mcp_servers]`. Después: añadir, editar y eliminar con backup. Comprobación de disponibilidad solo con acción explícita (lanza procesos). | Alto | Alta | Es el área de más riesgo: los MCP ejecutan procesos |
-| **0.5** | Agentes, reglas y comandos: `.claude/agents`, `.claude/commands`, `.cursor/rules`, `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`, mostrados por separado (son entidades distintas) | Medio | Media | Rutas por verificar |
-| 0.6 | Descubrimiento: búsqueda en GitHub y/o skills.sh. Migrar el webview a React + Vite en este punto | Medio | Media | Competir aquí aporta poco; integrar en vez de duplicar |
-| Luego | GitLab/Bitbucket, l10n (es/en), exponer el núcleo como CLI | Bajo–medio | Media | |
+| Versión | Contenido | Estado |
+|---|---|---|
+| 0.1 | MVP: inventario, matriz, diagnóstico, instalación segura | ✅ verificado en real |
+| 0.2 | Actualizaciones, copiar/mover, monorepos | ✅ (no se publicó por separado) |
+| **0.3** | Todo lo anterior más: agentes y editor, arreglos, merge y elegir copia, Map, rediseño, catálogo, plugins, enterprise, carpetas de categoría de Cursor, on/off por agente, Config (solo lectura), CI | ✅ implementado; falta la prueba manual de C.9 y publicar |
+| 0.4 | **Editar MCP** con backup: añadir, quitar, activar y desactivar servidores en cada formato. Comprobar disponibilidad solo con acción explícita, porque lanza procesos | Siguiente. Es el área de más riesgo |
+| 0.4 | Prompt files y custom agents de Copilot; `CLAUDE.md` / `AGENTS.md` anidados; plugins de Cursor si se documenta su ubicación | Verificar rutas antes |
+| 0.5 | Crear y editar reglas, subagentes y comandos desde la UI (plantillas por agente) | |
+| 0.6 | Catálogo: más fuentes (skills.sh si ofrece API), puntuación de calidad, detalle previo a instalar | Integrar en vez de duplicar |
+| Luego | GitLab y Bitbucket, l10n (es/en), núcleo como CLI | |

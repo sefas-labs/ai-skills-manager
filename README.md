@@ -10,7 +10,7 @@ Screenshots are in `docs/images/`.
 
 - **Multi-agent inventory:** scans the global and workspace folders that each agent reads according to its official documentation, plus any extra folders you configure.
   - **Monorepos:** also scans parent folders up to the repository root (Claude Code, Codex) and nested skills folders (Claude Code, Cursor).
-  - Includes skills synced from claude.ai (`~/.claude/skills/synced`, read-only).
+  - Includes skills synced from claude.ai (`~/.claude/skills/synced`, read-only; only the signed-in account's), Claude Code **plugin** and **enterprise** skills (read-only, shown as `<plugin>:<skill>`), and Cursor's **category folders** (`skills/<group>/<skill>`).
 - **Visibility matrix:** which agent loads which folder, and therefore each skill.
 - **Map tab:** a skill × agent coverage table that says why an agent can't use a skill and copies it to the folder that closes the gap, plus an interactive agent → folder → skill diagram.
 - **Knows your setup:** recognizes whether it runs in Cursor or VS Code and highlights that editor's agent. It also detects which of the four agents are installed (from files only: CLI on PATH, app, config file or editor extension; nothing is executed) and hides the ones it can't find, with a toggle to show all.
@@ -32,6 +32,8 @@ Screenshots are in `docs/images/`.
 - **Safe uninstall:** the folder is moved to a recoverable backup. If it's a symlink, only the link is removed.
 - **Provenance:** records the repository, ref, commit and tree SHA of everything it installs. It also reads the provenance that `gh skill install` writes into `SKILL.md`.
 - **Updates:** *Check for Updates* compares the installed tree SHA with the remote one (2 API calls per repository and branch). *Update…* first shows the added, modified and removed files, your local edits and the security review, then replaces the folder and keeps a backup.
+- **On / off per agent:** Claude Code (`skillOverrides`: on, name only, only `/name`, off), Codex (`[[skills.config]] enabled = false`), and Cursor/Copilot (`disable-model-invocation` / `user-invocable` in the skill, with a warning that it edits the skill). Every change shows the exact file first and keeps a backup.
+- **Config tab (read-only):** the instruction files, rules, subagents, commands and MCP servers each agent loads (`CLAUDE.md`, `AGENTS.md`, `.cursor/rules`, `.github/instructions`, `.mcp.json`, `~/.claude.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, Codex `config.toml`…). MCP environment variables and headers show names only; secret-looking arguments and connection-string passwords are masked.
 - **Add to project:** one click copies a global skill into the open project's skills folder that reaches the most installed agents.
 - **Copy or move** between folders (global ↔ workspace, `.claude/skills` ↔ `.agents/skills`): before writing, shows which agents gain and lose the skill.
 - Side bar, dashboard, light/dark/high-contrast themes, Workspace Trust.
@@ -69,6 +71,7 @@ Screenshots are in `docs/images/`.
 | `skillsManager.showEmptyLocations` | Show existing folders that contain no skills |
 | `skillsManager.scanParentFolders` | Parent folders up to the repository root (default: on) |
 | `skillsManager.scanNestedFolders` | Skills folders nested inside the workspace (default: on; max depth 6, skips `node_modules` and build folders) |
+| `skillsManager.scanPlugins` | Skills of enabled Claude Code plugins (default: on) |
 | `skillsManager.checkForUpdatesOnStartup` | Check for updates on startup, at most every 12 hours (default: off) |
 
 ## Development
@@ -78,8 +81,8 @@ Requirements: Node 18+ and VS Code 1.90+.
 ```bash
 npm install
 npm run build        # esbuild → dist/
-npm test             # 57 unit + integration tests (Node test runner, simulated GitHub)
-npm run test:smoke   # loads dist/extension.js against a simulated vscode API
+npm test             # 91 unit + integration tests (Node test runner, simulated GitHub)
+npm run test:smoke   # bundled extension with a simulated vscode API: activation, dashboard in jsdom, full dialog flows
 npm run test:e2e     # runs the extension inside real VS Code (temporary profile, local proxy, real GitHub)
 node test/e2e/run.mjs /Applications/Cursor.app/Contents/MacOS/Cursor   # same, in Cursor
 npm run typecheck    # tsc with @types/vscode
@@ -120,12 +123,11 @@ Publishing to the Marketplace requires `vsce publish` with a real publisher (cha
 
 ## Known limitations (v0.3)
 
-- Doesn't show skills from plugins (Claude/Cursor), Claude Code's enterprise path, or skills contributed by VS Code extensions.
-- Cursor walks each skills folder recursively (`skills/<group>/<skill>/SKILL.md`); this extension only reads the first level.
+- MCP servers, rules, subagents and commands are read-only (no editing yet).
+- Not covered: Cursor user rules (kept in its settings), Copilot prompt files and custom agents, nested `CLAUDE.md`/`AGENTS.md` below the workspace folder, Cursor plugins and plugins synced from claude.ai (their on-disk layout isn't documented), skills contributed by VS Code extensions.
 - GitHub only (no GitLab or Bitbucket). In huge repositories the file tree may come back truncated.
-- The install, update, copy/move and uninstall dialogs have no automated test in the real editor (they need clicks): see *Pendiente de prueba manual* in `docs/ANALISIS.md`.
+- Every dialog flow is tested end to end with the bundled extension and a simulated editor; a manual pass in the real editors is still listed under *Pendiente de prueba manual* in `docs/ANALISIS.md`.
 - The proxy was verified with `http.proxy` in VS Code 1.140 and Cursor 3.25.9 (based on VS Code 1.128). In older VS Code versions, `fetch` may not honor it.
-- No enable/disable yet, and no management of MCP servers, agents or rules: see the roadmap in `docs/ANALISIS.md`.
 
 Full market, product and architecture analysis (in Spanish): `docs/ANALISIS.md`.
 
