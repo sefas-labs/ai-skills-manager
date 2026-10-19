@@ -100,6 +100,11 @@ export interface ViewCustomization {
   description?: string;
   note?: string;
   servers?: Array<{ name: string; transport: string; command?: string; url?: string; envKeys: string[]; headerKeys: string[]; enabled: boolean }>;
+  /** MCP files the extension can edit (entry format); 'codex' also supports enable/disable. */
+  mcpFlavor?: string;
+  readOnlyReason?: string;
+  /** Rules, subagents and commands can be moved to the backup folder. */
+  deletable?: boolean;
 }
 
 export interface ViewState {
@@ -200,6 +205,11 @@ export type WebviewToHost =
   | { type: 'openUrl'; url: string }
   | { type: 'archiveSynced'; bucket: string }
   | { type: 'openCustomization'; id: string }
+  | { type: 'newCustomization'; kind: 'rule' | 'agent' | 'command' }
+  | { type: 'deleteCustomization'; id: string }
+  | { type: 'mcpAdd' }
+  | { type: 'mcpRemove'; id: string; name: string }
+  | { type: 'mcpToggle'; id: string; name: string; enabled: boolean }
   | { type: 'setToggle'; skillId: string; agent: 'claude'; value: 'on' | 'name-only' | 'user-invocable-only' | 'off' }
   | { type: 'setToggle'; skillId: string; agent: 'codex'; enabled: boolean }
   | { type: 'setToggle'; skillId: string; agent: 'frontmatter'; mode: 'auto' | 'manual' | 'off' }

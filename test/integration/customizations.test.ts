@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { codexMcpServers, maskArgs, mcpDuplicates, readCustomizations, safeUrl } from '../../src/core/customizations';
+import { codexMcpServers, maskArgs, mcpDuplicates, mcpTargets, readCustomizations, safeUrl } from '../../src/core/customizations';
 import { tempDir } from '../helpers/fsFixture';
 
 const w = async (p: string, c: string) => {
@@ -86,6 +86,18 @@ test('inventory: instructions, rules, agents, commands and MCP per agent, secret
   assert.deepEqual([cursorGh.command, cursorGh.envKeys], ['npx gh-mcp --token •••', ['GH']]);
   const dups = mcpDuplicates(items);
   assert.deepEqual(dups.map((d) => `${d.agent}:${d.name}:${d.files.length}`).sort(), ['claude-code:github:2']);
+  // Editable files carry their entry format; ~/.claude.json is left to `claude mcp`.
+  assert.deepEqual(mcp.map((i) => `${path.basename(i.path)}:${i.mcpFlavor ?? 'ro'}:${!!i.readOnlyReason}`).sort(), ['.claude.json:ro:true', '.claude.json:ro:true', '.mcp.json:claude:false', 'mcp.json:cursor:false']);
+  const targets = mcpTargets({ homeDir: home, workspaceFolders: [ws], platform: process.platform });
+  assert.deepEqual(targets.map((t) => `${path.relative(root, t.path)}:${t.flavor}`), [
+    'repo/app/.mcp.json:claude',
+    'repo/app/.cursor/mcp.json:cursor',
+    'repo/app/.vscode/mcp.json:vscode',
+    'repo/app/.codex/config.toml:codex',
+    'home/.cursor/mcp.json:cursor',
+    ...(process.env.COPILOT_HOME ? [] : ['home/.copilot/mcp-config.json:copilot-cli']),
+    ...(process.env.CODEX_HOME ? [] : ['home/.codex/config.toml:codex']),
+  ].filter(Boolean));
 });
 
 test('nested CLAUDE.md / AGENTS.md, Copilot prompt files and custom agents', async () => {

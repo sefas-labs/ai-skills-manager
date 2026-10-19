@@ -110,6 +110,16 @@ Bugs corregidos:
 - Corregido: el catálogo cortaba los SKILL.md de más de 256 KB. Ahora usa el mismo límite de 1 MB que la instalación.
 - Instalar → *Where to install* ya no es un desplegable con todas las carpetas posibles (muchas marcadas *new folder*). Ahora son dos tarjetas, **This project** y **All my projects**, cada una con su carpeta recomendada: la que llega a más agentes instalados, priorizando una que ya exista. *Choose another folder…* muestra las demás carpetas existentes y solo las nuevas que añaden un agente instalado.
 - Corregido: el aviso *"Already in this folder"* contaba los skills sincronizados de claude.ai, que no se reemplazan.
+- **Config: más archivos leídos.**
+  - `CLAUDE.md` / `AGENTS.md` anidados bajo el workspace (búsqueda acotada, sin `node_modules` ni carpetas de build), con la nota de cuándo los carga cada agente. Copilot solo con `chat.useNestedAgentsMdFiles`.
+  - Copilot: custom agents (`.github/agents/*.agent.md`, `~/.copilot/agents`) y prompt files (`.github/prompts/*.prompt.md` y la carpeta `prompts` del perfil de VS Code ⚠️).
+- **Skills de más orígenes (solo lectura):** los integrados de Cursor (`~/.cursor/skills-cursor` ⚠️ observado), los plugins locales de Cursor (`~/.cursor/plugins/local/<plugin>/skills`, documentado) y los plugins sincronizados de claude.ai (`plugins/synced/<cuenta>/<plugin>` ⚠️, se respeta `enabledPlugins["<name>@synced"]`).
+- **Config: edición** (`core/editing.ts`, `ui/editing.ts`). Cada cambio pasa por un modal nativo con el archivo exacto y guarda un backup; se escribe con archivo temporal + rename. Los archivos del proyecto no se tocan en Restricted Mode.
+  - **New…** en Rules, Subagents y Commands crea un archivo desde una plantilla por agente (`.claude/rules`, `.cursor/rules/*.mdc`, `.github/instructions`, `.claude/agents`, `.github/agents/*.agent.md`, `.claude/commands`, `.github/prompts/*.prompt.md`), en el proyecto o en el usuario. Nombre validado, `wx` + `0o644` (nunca sobrescribe) y se abre en el editor.
+  - Borrar una regla, subagente o comando lo mueve al backup.
+  - **MCP — Add server…:** stdio (comando + argumentos) o HTTP (solo `https://`, o `http://` en localhost), con la forma de entrada documentada por cada agente: Claude y VS Code `type: stdio|http`; Cursor `type: stdio` y `url` sin `type`; Copilot CLI `type: local|http` + `tools: ["*"]`; Codex `[mcp_servers.<name>]`. El modal muestra la entrada exacta y avisa de que el agente ejecutará ese comando.
+  - **MCP — quitar** un servidor (JSON y TOML, solo su tabla y subtablas) y **activar/desactivar** en Codex (`enabled = false`, el único agente que lo documenta en archivo).
+  - No se escribe `~/.claude.json` (Claude Code lo reescribe; se remite a `claude mcp add/remove`) ni archivos JSON con comentarios (se perderían).
 - `npm run test:e2e`: ejecuta la extensión dentro de VS Code o Cursor reales, con un perfil temporal y un proxy local.
 
 ## 0.1.0 — 2026-10-18

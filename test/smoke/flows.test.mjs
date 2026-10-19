@@ -44,7 +44,7 @@ async function boot() {
   const last = (type) => state.panelMessages.findLast((m) => m.type === type);
   const view = () => last('state').state;
   const skill = (pred) => view().skills.find(pred);
-  return { ...env, state, gh, api, restore, asked, last, view, skill };
+  return { ...env, state, fake, gh, api, restore, asked, last, view, skill };
 }
 
 test('install from GitHub: analyze → review → install, no exec bits, provenance recorded', async () => {
@@ -134,6 +134,58 @@ test('merge: a redundant copy is moved to the backup and the duplicate warning d
     for (const d of removed) assert.ok(!fs.existsSync(d), `${d} moved to backup`);
     for (const d of kept) assert.ok(fs.existsSync(d), `${d} kept`);
     assert.ok(!t.view().merges.some((x) => x.name === 'global-one' && x.verdict === 'remove-redundant'), 'nothing left to merge');
+  } finally {
+    t.restore();
+  }
+});
+
+test('config edits: new rule from a template, delete to backup, MCP add / toggle / remove', async () => {
+  const t = await boot();
+  try {
+    const typed = [];
+    t.fake.window.showInputBox = async () => typed.shift();
+    const cfg = () => t.view().customizations.items;
+
+    // New rule: first template (Claude Code rule) → first scope (this project) → name.
+    typed.push('house-style');
+    await t.state.send({ type: 'newCustomization', kind: 'rule' });
+    const rule = path.join(t.workspace, '.claude/rules/house-style.md');
+    assert.match(fs.readFileSync(rule, 'utf8'), /^# house-style/);
+    assert.ok(t.state.opened.includes(rule), 'opened in the editor');
+    const item = cfg().find((c) => c.kind === 'rule' && c.title === 'house-style.md');
+    assert.ok(item?.deletable);
+    await t.state.send({ type: 'deleteCustomization', id: item.id });
+    assert.ok(!fs.existsSync(rule), 'moved to backup');
+    assert.ok(t.asked.some((m) => /Delete house-style/.test(m)));
+
+    // MCP: first target is the project's .mcp.json; stdio; name, command, args.
+    typed.push('memory', 'npx', '-y "@modelcontextprotocol/server-memory"');
+    await t.state.send({ type: 'mcpAdd' });
+    const mcpFile = path.join(t.workspace, '.mcp.json');
+    assert.deepEqual(JSON.parse(fs.readFileSync(mcpFile, 'utf8')), { mcpServers: { memory: { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-memory'] } } });
+    assert.ok(t.asked.some((m) => /Add MCP server "memory"/.test(m)));
+    const card = cfg().find((c) => c.kind === 'mcp' && c.displayPath.endsWith('.mcp.json'));
+    assert.equal(card.mcpFlavor, 'claude');
+    await t.state.send({ type: 'mcpRemove', id: card.id, name: 'memory' });
+    assert.deepEqual(JSON.parse(fs.readFileSync(mcpFile, 'utf8')), { mcpServers: {} });
+
+    // Codex: enable/disable writes `enabled` in that server's table only.
+    const codex = path.join(t.home, '.codex/config.toml');
+    fs.mkdirSync(path.dirname(codex), { recursive: true });
+    fs.writeFileSync(codex, 'model = "gpt-5"\n\n[mcp_servers.docs]\ncommand = "docs-mcp"\n');
+    await t.state.commands.get('skillsManager.refresh')();
+    const cx = cfg().find((c) => c.mcpFlavor === 'codex');
+    await t.state.send({ type: 'mcpToggle', id: cx.id, name: 'docs', enabled: false });
+    assert.equal(fs.readFileSync(codex, 'utf8'), 'model = "gpt-5"\n\n[mcp_servers.docs]\nenabled = false\ncommand = "docs-mcp"\n');
+    assert.equal(cfg().find((c) => c.mcpFlavor === 'codex').servers[0].enabled, false);
+
+    // ~/.claude.json is never written.
+    fs.writeFileSync(path.join(t.home, '.claude.json'), JSON.stringify({ mcpServers: { gh: { command: 'gh-mcp' } } }));
+    await t.state.commands.get('skillsManager.refresh')();
+    const cj = cfg().find((c) => c.displayPath === '~/.claude.json');
+    assert.ok(cj.readOnlyReason && !cj.mcpFlavor);
+    await t.state.send({ type: 'mcpRemove', id: cj.id, name: 'gh' });
+    assert.match(fs.readFileSync(path.join(t.home, '.claude.json'), 'utf8'), /gh-mcp/);
   } finally {
     t.restore();
   }

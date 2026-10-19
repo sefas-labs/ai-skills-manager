@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { parseFrontmatter } from './frontmatter';
 import { ancestorsUpTo, findRepoRoot } from './monorepo';
 import { pathKey } from './paths';
+import type { McpFlavor } from './editing';
 import type { ProviderId } from './types';
 
 /**
@@ -14,9 +15,9 @@ import type { ProviderId } from './types';
  *  - Copilot (VS Code): code.visualstudio.com/docs/copilot/customization/custom-instructions,
  *    /customization/mcp-servers, /reference/mcp-configuration
  *  - Codex: learn.chatgpt.com/docs/agent-configuration/agents-md, /docs/extend/mcp
- * Not covered (❓ in the docs or no file): Cursor user rules (stored in settings),
- * Cursor/Copilot custom commands, prompt files and custom agents, nested
- * CLAUDE.md/AGENTS.md below the workspace folder.
+ * Also Copilot prompt files and custom agents, and CLAUDE.md / AGENTS.md
+ * nested below the workspace folder. Not covered: Cursor user rules (stored in
+ * its settings) and Cursor commands. Writes live in editing.ts.
  *
  * Secrets: MCP `env` / `headers` values are never read into the result, only
  * their names; arguments and URLs that look like credentials are masked.
@@ -46,7 +47,13 @@ export interface CustomizationItem {
   /** Extra context, e.g. "loaded instead of CLAUDE.md" or the MCP file's key. */
   note?: string;
   servers?: McpServerInfo[];
+  /** MCP files we can edit: the entry format to write. */
+  mcpFlavor?: McpFlavor;
+  /** Why the extension won't write this file (shown instead of edit buttons). */
+  readOnlyReason?: string;
 }
+
+const CLAUDE_JSON_REASON = 'Claude Code rewrites ~/.claude.json itself — use `claude mcp add` / `claude mcp remove` in a terminal.';
 
 export interface CustomizationInput {
   homeDir: string;
@@ -342,8 +349,8 @@ export async function readCustomizations(input: CustomizationInput): Promise<Cus
   for (const p of await listFiles(path.join(home, '.claude', 'commands'), (n) => n.endsWith('.md'))) await push({ kind: 'command', path: p, scope: 'user', agents: ['claude-code'], title: '/' + path.basename(p, '.md') }, true);
 
   // --- MCP servers ---
-  const mcp = async (file: string, scope: CustomizationItem['scope'], agents: ProviderId[], servers: McpServerInfo[] | undefined, note?: string) => {
-    if (servers?.length) out.push({ kind: 'mcp', path: file, scope, agents, title: path.basename(file), servers, note });
+  const mcp = async (file: string, scope: CustomizationItem['scope'], agents: ProviderId[], servers: McpServerInfo[] | undefined, note?: string, mcpFlavor?: McpFlavor) => {
+    if (servers?.length) out.push({ kind: 'mcp', path: file, scope, agents, title: path.basename(file), servers, note, mcpFlavor, readOnlyReason: mcpFlavor ? undefined : CLAUDE_JSON_REASON });
   };
   const claudeJson = path.join(home, '.claude.json');
   await mcp(claudeJson, 'user', ['claude-code'], await jsonServers(claudeJson, 'mcpServers'), 'User scope (top-level mcpServers)');
@@ -359,20 +366,51 @@ export async function readCustomizations(input: CustomizationInput): Promise<Cus
       }),
       'Local scope (this project, in ~/.claude.json)',
     );
-    await mcp(path.join(ws, '.mcp.json'), 'project', ['claude-code', 'copilot'], await jsonServers(path.join(ws, '.mcp.json'), 'mcpServers'));
-    await mcp(path.join(ws, '.cursor', 'mcp.json'), 'project', ['cursor'], await jsonServers(path.join(ws, '.cursor', 'mcp.json'), 'mcpServers'));
-    await mcp(path.join(ws, '.vscode', 'mcp.json'), 'project', ['copilot'], await jsonServers(path.join(ws, '.vscode', 'mcp.json'), 'servers'));
+    await mcp(path.join(ws, '.mcp.json'), 'project', ['claude-code', 'copilot'], await jsonServers(path.join(ws, '.mcp.json'), 'mcpServers'), undefined, 'claude');
+    await mcp(path.join(ws, '.cursor', 'mcp.json'), 'project', ['cursor'], await jsonServers(path.join(ws, '.cursor', 'mcp.json'), 'mcpServers'), undefined, 'cursor');
+    await mcp(path.join(ws, '.vscode', 'mcp.json'), 'project', ['copilot'], await jsonServers(path.join(ws, '.vscode', 'mcp.json'), 'servers'), undefined, 'vscode');
     const codexProject = path.join(ws, '.codex', 'config.toml');
     const t = await fs.readFile(codexProject, 'utf8').catch(() => undefined);
-    if (t) await mcp(codexProject, 'project', ['codex'], codexMcpServers(t), 'Only for trusted projects');
+    if (t) await mcp(codexProject, 'project', ['codex'], codexMcpServers(t), 'Only for trusted projects', 'codex');
   }
-  await mcp(path.join(home, '.cursor', 'mcp.json'), 'user', ['cursor'], await jsonServers(path.join(home, '.cursor', 'mcp.json'), 'mcpServers'));
-  if (input.vscodeUserMcp) await mcp(input.vscodeUserMcp, 'user', ['copilot'], await jsonServers(input.vscodeUserMcp, 'servers'), 'VS Code profile');
+  await mcp(path.join(home, '.cursor', 'mcp.json'), 'user', ['cursor'], await jsonServers(path.join(home, '.cursor', 'mcp.json'), 'mcpServers'), undefined, 'cursor');
+  if (input.vscodeUserMcp) await mcp(input.vscodeUserMcp, 'user', ['copilot'], await jsonServers(input.vscodeUserMcp, 'servers'), 'VS Code profile', 'vscode');
   const copilotCli = path.join(process.env.COPILOT_HOME || path.join(home, '.copilot'), 'mcp-config.json');
-  await mcp(copilotCli, 'user', ['copilot'], await jsonServers(copilotCli, 'mcpServers'));
+  await mcp(copilotCli, 'user', ['copilot'], await jsonServers(copilotCli, 'mcpServers'), 'Copilot CLI', 'copilot-cli');
   const codexUser = path.join(codexHome, 'config.toml');
   const t = await fs.readFile(codexUser, 'utf8').catch(() => undefined);
-  if (t) await mcp(codexUser, 'user', ['codex'], codexMcpServers(t));
+  if (t) await mcp(codexUser, 'user', ['codex'], codexMcpServers(t), undefined, 'codex');
+  return out;
+}
+
+export interface McpTarget {
+  path: string;
+  flavor: McpFlavor;
+  scope: 'project' | 'user';
+  agents: ProviderId[];
+  label: string;
+}
+
+/** Files a new MCP server can be written to (they may not exist yet). Claude Code's user/local scopes live in ~/.claude.json: not offered. */
+export function mcpTargets(input: CustomizationInput): McpTarget[] {
+  const ws = input.workspaceFolders[0];
+  const home = input.homeDir;
+  const codexHome = input.codexHome || path.join(home, '.codex');
+  const out: McpTarget[] = [];
+  if (ws) {
+    out.push(
+      { path: path.join(ws, '.mcp.json'), flavor: 'claude', scope: 'project', agents: ['claude-code', 'copilot'], label: 'Claude Code (project, shared)' },
+      { path: path.join(ws, '.cursor', 'mcp.json'), flavor: 'cursor', scope: 'project', agents: ['cursor'], label: 'Cursor (project)' },
+      { path: path.join(ws, '.vscode', 'mcp.json'), flavor: 'vscode', scope: 'project', agents: ['copilot'], label: 'VS Code / Copilot (project)' },
+      { path: path.join(ws, '.codex', 'config.toml'), flavor: 'codex', scope: 'project', agents: ['codex'], label: 'Codex (project, trusted projects only)' },
+    );
+  }
+  out.push({ path: path.join(home, '.cursor', 'mcp.json'), flavor: 'cursor', scope: 'user', agents: ['cursor'], label: 'Cursor (user)' });
+  if (input.vscodeUserMcp) out.push({ path: input.vscodeUserMcp, flavor: 'vscode', scope: 'user', agents: ['copilot'], label: 'VS Code / Copilot (user profile)' });
+  out.push(
+    { path: path.join(process.env.COPILOT_HOME || path.join(home, '.copilot'), 'mcp-config.json'), flavor: 'copilot-cli', scope: 'user', agents: ['copilot'], label: 'Copilot CLI (user)' },
+    { path: path.join(codexHome, 'config.toml'), flavor: 'codex', scope: 'user', agents: ['codex'], label: 'Codex (user)' },
+  );
   return out;
 }
 

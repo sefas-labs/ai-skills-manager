@@ -33,7 +33,9 @@ Screenshots are in `docs/images/`.
 - **Provenance:** records the repository, ref, commit and tree SHA of everything it installs. It also reads the provenance that `gh skill install` writes into `SKILL.md`.
 - **Updates:** *Check for Updates* compares the installed tree SHA with the remote one (2 API calls per repository and branch). *Update…* first shows the added, modified and removed files, your local edits and the security review, then replaces the folder and keeps a backup.
 - **On / off per agent:** Claude Code (`skillOverrides`: on, name only, only `/name`, off), Codex (`[[skills.config]] enabled = false`), and Cursor/Copilot (`disable-model-invocation` / `user-invocable` in the skill, with a warning that it edits the skill). Every change shows the exact file first and keeps a backup.
-- **Config tab (read-only):** the instruction files, rules, subagents, commands and MCP servers each agent loads (`CLAUDE.md`, `AGENTS.md`, `.cursor/rules`, `.github/instructions`, `.mcp.json`, `~/.claude.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, Codex `config.toml`…). MCP environment variables and headers show names only; secret-looking arguments and connection-string passwords are masked.
+- **Config tab:** the instruction files (including nested `CLAUDE.md`/`AGENTS.md`), rules, subagents and Copilot custom agents, commands and prompt files, and MCP servers each agent loads (`CLAUDE.md`, `AGENTS.md`, `.cursor/rules`, `.github/instructions`, `.github/agents`, `.github/prompts`, `.mcp.json`, `~/.claude.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, Codex `config.toml`…). MCP environment variables and headers show names only; secret-looking arguments and connection-string passwords are masked.
+  - **Create** a rule, subagent, command or prompt file from a per-agent template (never overwrites), or **delete** one to the backup folder.
+  - **Add, remove** (and, for Codex, **enable/disable**) MCP servers, written in each agent's documented format. Every change shows the exact file and entry first and keeps a backup. `~/.claude.json` is left to `claude mcp`, and JSON files with comments are left for you to edit by hand.
 - **Add to project:** one click copies a global skill into the open project's skills folder that reaches the most installed agents.
 - **Copy or move** between folders (global ↔ workspace, `.claude/skills` ↔ `.agents/skills`): before writing, shows which agents gain and lose the skill.
 - Side bar, dashboard, light/dark/high-contrast themes, Workspace Trust.
@@ -123,8 +125,8 @@ Publishing to the Marketplace requires `vsce publish` with a real publisher (cha
 
 ## Known limitations (v0.3)
 
-- MCP servers, rules, subagents and commands are read-only (no editing yet).
-- Not covered: Cursor user rules (kept in its settings), Copilot prompt files and custom agents, nested `CLAUDE.md`/`AGENTS.md` below the workspace folder, Cursor plugins and plugins synced from claude.ai (their on-disk layout isn't documented), skills contributed by VS Code extensions.
+- MCP: no editing of existing server entries (remove and add again), of `~/.claude.json` (use `claude mcp`) or of JSON files with comments. Enable/disable only for Codex; the other agents do it in their own UI.
+- Not covered: Cursor user rules (kept in its settings), skills contributed by VS Code extensions. Cursor's built-in skills folder and the layout of claude.ai synced plugins were observed on disk, not documented.
 - GitHub only (no GitLab or Bitbucket). In huge repositories the file tree may come back truncated.
 - Every dialog flow is tested end to end with the bundled extension and a simulated editor; a manual pass in the real editors is still listed under *Pendiente de prueba manual* in `docs/ANALISIS.md`.
 - The proxy was verified with `http.proxy` in VS Code 1.140 and Cursor 3.25.9 (based on VS Code 1.128). In older VS Code versions, `fetch` may not honor it.

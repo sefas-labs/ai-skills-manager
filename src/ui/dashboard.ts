@@ -24,6 +24,7 @@ import { confirmAndUninstall, copySkillPath, getGitHubToken, makeGitHubClient, o
 import type { SkillsService } from './service';
 import { chooseCopy } from './choose';
 import { fixSkill } from './fixes';
+import { addMcp, deleteCustomization, newCustomization, removeMcp, toggleMcp } from './editing';
 import { log } from './log';
 import { handleMerge } from './merge';
 import { setSkillToggle, type ToggleRequest } from './toggles';
@@ -161,6 +162,21 @@ export class DashboardPanel implements vscode.Disposable {
           if (item) await vscode.window.showTextDocument(vscode.Uri.file(item.path), { preview: true });
           return;
         }
+        case 'newCustomization':
+          await this.withBusy('edit', () => newCustomization(this.service, m.kind));
+          return;
+        case 'deleteCustomization':
+          await this.withBusy('edit', () => deleteCustomization(this.service, m.id));
+          return;
+        case 'mcpAdd':
+          await this.withBusy('edit', () => addMcp(this.service));
+          return;
+        case 'mcpRemove':
+          await this.withBusy('edit', () => removeMcp(this.service, m.id, m.name));
+          return;
+        case 'mcpToggle':
+          await this.withBusy('edit', () => toggleMcp(this.service, m.id, m.name, m.enabled));
+          return;
         case 'archiveSynced': {
           const loc = this.service.current?.locations.find((l) => l.skippedSyncedBuckets?.some((b) => b.bucket === m.bucket));
           const b = loc?.skippedSyncedBuckets?.find((x) => x.bucket === m.bucket);

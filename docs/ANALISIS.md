@@ -160,7 +160,7 @@ Correspondencia con los 8 módulos pedidos:
 | 2. Provider Adapters | `core/providers/index.ts`, `core/plugins.ts`, `core/monorepo.ts` | ✅ (4 agentes; carpetas padre, anidadas, plugins y enterprise; extra por configuración) |
 | 3. Installation Manager | `core/installer.ts` | ✅ |
 | 4. Update Manager | `core/updates.ts`, `core/provenance.ts`, `ui/updates.ts` | ✅ v0.2 (tree SHA remoto, diff por blob SHA, procedencia de `gh skill`) |
-| 5. Configuration Manager | `core/toggles.ts` (on/off por agente), `core/customizations.ts` (inventario) | ✅ toggles por agente; ⚠️ MCP, reglas, subagentes y comandos solo en lectura |
+| 5. Configuration Manager | `core/toggles.ts` (on/off por agente), `core/customizations.ts` (inventario), `core/editing.ts` (escritura) | ✅ toggles por agente; ✅ crear/borrar reglas, subagentes, comandos y prompts; ✅ añadir/quitar MCP (on/off solo Codex) |
 | 6. Registry / Marketplace | `core/catalog.ts`, `ui/catalog.ts`, `webview/catalog.ts` | ✅ colecciones destacadas + búsqueda en GitHub; instalar pasa por la revisión normal |
 | 7. Dashboard UI | `ui/dashboard.ts`, `src/webview/*`, `media/dashboard.css` | ✅ |
 | 8. Security & Validation | `core/validate.ts`, `core/inspector.ts`, `core/paths.ts` | ✅ |
@@ -402,6 +402,11 @@ Estas funciones salieron de usar la extensión a diario (18–19 oct 2026):
 | Elegir qué copia se usa | `core/choose.ts`, `ui/choose.ts` | Cursor y Copilot no documentan qué copia gana ni permiten ocultar una carpeta, así que la elección se aplica igualando las demás (nadie pierde el skill) o quitándolas (avisa de quién lo pierde). | ✅ tests + smoke |
 | Add to project | `ui/transfer.ts` | Copia un skill global a una carpeta del proyecto. Indica qué cargará el equipo y qué ganas tú, y avisa si la licencia es propietaria o el skill viene de claude.ai. | ✅ smoke |
 | Pestaña Map | `webview/main.ts` | Cobertura skill × agente con el motivo de cada celda y un botón *Copy to*, más un diagrama SVG agente → carpeta → skill, sin librerías. | ✅ jsdom + capturas |
+| CLAUDE.md / AGENTS.md anidados | `core/customizations.ts` | Recorrido acotado (6 niveles, 5.000 carpetas, sin `node_modules`/build). Claude Code los carga al trabajar en esa subcarpeta ([memory](https://code.claude.com/docs/en/memory)); Cursor combina los `AGENTS.md` anidados ([rules](https://cursor.com/docs/context/rules)); Copilot solo con `chat.useNestedAgentsMdFiles`. | ✅ documentado (19-oct-2026) + tests |
+| Custom agents y prompt files de Copilot | `core/customizations.ts` | `.github/agents/*.agent.md`, `~/.copilot/agents`, `.github/prompts/*.prompt.md` ([custom agents](https://code.visualstudio.com/docs/copilot/customization/custom-agents), [prompt files](https://code.visualstudio.com/docs/copilot/customization/prompt-files)); prompts de usuario en `User/prompts` del perfil. | ✅ rutas de proyecto; ⚠️ carpeta del perfil observada |
+| Skills de Cursor (integrados y plugins locales) | `core/plugins.ts` | `~/.cursor/plugins/local/<plugin>/skills` ([plugins](https://cursor.com/docs/plugins)); `~/.cursor/skills-cursor` con los integrados. Solo lectura. | ✅ plugins locales; ⚠️ carpeta de integrados observada |
+| Plugins sincronizados de claude.ai | `core/plugins.ts` | `<plugins>/synced/<cuenta activa>/<plugin>`; carga como `<name>@synced` y se respeta `enabledPlugins` ([plugins](https://code.claude.com/docs/en/plugins)). | ⚠️ layout por cuenta observado |
+| Editar Config | `core/editing.ts`, `ui/editing.ts` | Plantillas por agente (`wx` + `0o644`, nombre validado); borrar = mover al backup. MCP: añadir (stdio/HTTP), quitar, on/off en Codex. Forma de entrada por agente: [Claude](https://code.claude.com/docs/en/mcp), [VS Code](https://code.visualstudio.com/docs/copilot/reference/mcp-configuration), [Cursor](https://cursor.com/docs/context/mcp), [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers), Codex `[mcp_servers.*]`. Backup + temporal + rename; nunca `~/.claude.json` ni JSONC; Workspace Trust. | ✅ formatos verificados 19-oct-2026; tests de integración, jsdom y flujo completo |
 | Coherencia host/webview | `scripts/build.mjs` | Ambos bundles comparten el id de build. Si no coinciden (se reinstaló sin recargar), el dashboard pide recargar la ventana. | ✅ jsdom |
 
 **Lecciones del uso real:**
@@ -425,10 +430,10 @@ Estas funciones salieron de usar la extensión a diario (18–19 oct 2026):
   - detección de agentes instalados y del editor;
   - on/off con el mecanismo de cada uno;
   - pestaña Map de cobertura;
-  - pestaña Config de solo lectura (instrucciones, reglas, subagentes, comandos y MCP).
+  - pestaña Config: instrucciones (también anidadas), reglas, subagentes y custom agents, comandos y prompt files, y MCP; crear y borrar archivos desde plantillas, añadir y quitar servidores MCP, on/off en Codex.
 - **Calidad:**
-  - 91 tests unitarios y de integración;
-  - 17 smoke: activación, 8 de webview en jsdom y 4 flujos completos con modales;
+  - 103 tests unitarios y de integración;
+  - 19 smoke: activación, webview en jsdom y 5 flujos completos con modales;
   - e2e en el editor real;
   - CI en Linux y macOS.
 
@@ -440,14 +445,14 @@ Estas funciones salieron de usar la extensión a diario (18–19 oct 2026):
 - Proxy (`http.proxy`), proveedor de auth `github` en Cursor e instalación del VSIX en ambos editores.
 
 **Pendiente de prueba manual** (los flujos con modales ya están probados de punta a punta con la extensión empaquetada; falta verlos en el editor):
-- En VS Code y en Cursor, recorrer: catálogo → Install…; Update… y *Compare Files…*; Add to project; Use this copy; Fix; On/off por agente; Remove; Move to backup… (claude.ai); Config → abrir un archivo.
+- En VS Code y en Cursor, recorrer: Config → New… (regla), Add server… (MCP) y quitarlo; catálogo → Install…; Update… y *Compare Files…*; Add to project; Use this copy; Fix; On/off por agente; Remove; Move to backup… (claude.ai); Config → abrir un archivo.
 - Comprobar en Cursor (Settings → Rules & Skills) que un skill instalado o apagado se refleja.
 - Revisar la vista en alto contraste y en paneles de menos de 500 px.
 - Probar un proxy con autenticación.
 
 **Parcial / no cubierto:**
-- MCP, reglas, subagentes y comandos solo en lectura (no se editan).
-- No se cubren: reglas de usuario de Cursor (están en sus settings), prompt files y custom agents de Copilot, `CLAUDE.md` / `AGENTS.md` anidados bajo el workspace, plugins de Cursor y plugins sincronizados de claude.ai (formato no documentado).
+- MCP: no se edita una entrada existente (quitar y volver a añadir), ni `~/.claude.json` (se remite a `claude mcp`), ni JSON con comentarios. On/off solo en Codex.
+- No se cubren las reglas de usuario de Cursor (están en sus settings). ⚠️ La carpeta de skills integrados de Cursor y el layout de plugins sincronizados de claude.ai están observados, no documentados.
 - Solo GitHub. En repos enormes, la instalación avisa del árbol truncado pero no pagina.
 
 ---
@@ -460,9 +465,8 @@ Prioridad = impacto × demanda ÷ dificultad.
 |---|---|---|
 | 0.1 | MVP: inventario, matriz, diagnóstico, instalación segura | ✅ verificado en real |
 | 0.2 | Actualizaciones, copiar/mover, monorepos | ✅ (no se publicó por separado) |
-| **0.3** | Todo lo anterior más: agentes y editor, arreglos, merge y elegir copia, Map, rediseño, catálogo, plugins, enterprise, carpetas de categoría de Cursor, on/off por agente, Config (solo lectura), CI | ✅ implementado; falta la prueba manual de C.9 y publicar |
-| 0.4 | **Editar MCP** con backup: añadir, quitar, activar y desactivar servidores en cada formato. Comprobar disponibilidad solo con acción explícita, porque lanza procesos | Siguiente. Es el área de más riesgo |
-| 0.4 | Prompt files y custom agents de Copilot; `CLAUDE.md` / `AGENTS.md` anidados; plugins de Cursor si se documenta su ubicación | Verificar rutas antes |
-| 0.5 | Crear y editar reglas, subagentes y comandos desde la UI (plantillas por agente) | |
+| **0.3** | Todo lo anterior más: agentes y editor, arreglos, merge y elegir copia, Map, rediseño, catálogo, plugins, enterprise, carpetas de categoría de Cursor, on/off por agente, Config (lectura y edición), CI | ✅ implementado; falta la prueba manual de C.9 y publicar |
+| 0.3 (adelantado de 0.4/0.5) | Editar MCP con backup (añadir, quitar, on/off en Codex); prompt files y custom agents de Copilot; `CLAUDE.md` / `AGENTS.md` anidados; skills de Cursor (integrados y plugins locales) y plugins sincronizados de claude.ai; crear y borrar reglas, subagentes, comandos y prompts desde plantillas | ✅ implementado y con tests; falta la prueba manual |
+| 0.4 | MCP: editar una entrada existente, comprobar disponibilidad solo con acción explícita (lanza procesos), on/off donde se documente | Siguiente |
 | 0.6 | Catálogo: más fuentes (skills.sh si ofrece API), puntuación de calidad, detalle previo a instalar | Integrar en vez de duplicar |
 | Luego | GitLab y Bitbucket, l10n (es/en), núcleo como CLI | |

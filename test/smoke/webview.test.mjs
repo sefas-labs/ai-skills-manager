@@ -199,11 +199,14 @@ test('config tab: sections per kind, MCP servers with names only, duplicates fla
   state.customizations = {
     items: [
       { id: '0', kind: 'instructions', displayPath: '~/repo/CLAUDE.md', scope: 'project', agents: ['claude-code', 'copilot'], title: 'CLAUDE.md' },
-      { id: '1', kind: 'rule', displayPath: '~/repo/.cursor/rules/react.mdc', scope: 'project', agents: ['cursor'], title: 'react.mdc', description: 'React rules' },
-      { id: '2', kind: 'mcp', displayPath: '~/repo/.mcp.json', scope: 'project', agents: ['claude-code', 'copilot'], title: '.mcp.json', servers: [{ name: 'github', transport: 'http', url: 'https://api.example.com/mcp', envKeys: [], headerKeys: ['Authorization'], enabled: true }] },
+      { id: '1', kind: 'rule', displayPath: '~/repo/.cursor/rules/react.mdc', scope: 'project', agents: ['cursor'], title: 'react.mdc', description: 'React rules', deletable: true },
+      { id: '2', kind: 'mcp', displayPath: '~/repo/.mcp.json', scope: 'project', agents: ['claude-code', 'copilot'], title: '.mcp.json', mcpFlavor: 'claude', servers: [{ name: 'github', transport: 'http', url: 'https://api.example.com/mcp', envKeys: [], headerKeys: ['Authorization'], enabled: true }] },
+      { id: '3', kind: 'mcp', displayPath: '~/.codex/config.toml', scope: 'user', agents: ['codex'], title: 'config.toml', mcpFlavor: 'codex', servers: [{ name: 'docs', transport: 'stdio', command: 'docs-mcp', envKeys: [], headerKeys: [], enabled: true }] },
+      { id: '4', kind: 'mcp', displayPath: '~/.claude.json', scope: 'user', agents: ['claude-code'], title: '.claude.json', readOnlyReason: 'Use claude mcp.', servers: [{ name: 'gh', transport: 'stdio', command: 'gh-mcp', envKeys: [], headerKeys: [], enabled: true }] },
     ],
     mcpDuplicates: [{ agent: 'claude-code', name: 'github', files: ['~/repo/.mcp.json', '~/.claude.json'] }],
   };
+  state.agents.codex = { installed: true, evidence: ['~/.codex'] };
   post({ type: 'state', state });
   assert.deepEqual(errors(), []);
   const text = doc.body.textContent;
@@ -213,6 +216,21 @@ test('config tab: sections per kind, MCP servers with names only, duplicates fla
   assert.match(doc.querySelector('.banner.warn').textContent, /Claude Code: github/);
   click('react.mdc');
   assert.deepEqual(sent.at(-1), { type: 'openCustomization', id: '1' });
+
+  // Edit controls: create, delete, MCP add / remove / Codex toggle; none for read-only files.
+  click('New…', doc.querySelectorAll('section.panel')[1]);
+  assert.deepEqual(sent.at(-1), { type: 'newCustomization', kind: 'rule' });
+  doc.querySelector('[aria-label^="Delete react.mdc"]').click();
+  assert.deepEqual(sent.at(-1), { type: 'deleteCustomization', id: '1' });
+  click('Add server…');
+  assert.deepEqual(sent.at(-1), { type: 'mcpAdd' });
+  doc.querySelector('[aria-label="Remove github from this file"]').click();
+  assert.deepEqual(sent.at(-1), { type: 'mcpRemove', id: '2', name: 'github' });
+  doc.querySelector('[aria-label="Disable docs in Codex"]').click();
+  assert.deepEqual(sent.at(-1), { type: 'mcpToggle', id: '3', name: 'docs', enabled: false });
+  assert.equal(doc.querySelector('[aria-label="Remove gh from this file"]'), null, '~/.claude.json has no remove button');
+  assert.match(text, /Use claude mcp\./);
+  assert.equal(doc.querySelector('[aria-label^="Delete CLAUDE.md"]'), null, 'instructions are not deletable');
 });
 
 test('install step 3: two recommended destinations, other folders only on request, no pointless new folders', () => {
