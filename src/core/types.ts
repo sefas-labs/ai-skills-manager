@@ -59,6 +59,8 @@ export interface DiscoveryContext {
   nestedDirs?: Record<string, string[]>;
   /** Skill roots of enabled Claude Code plugins (see plugins.ts). */
   claudePlugins?: ReadLocation[];
+  /** Cursor's built-in skills and local plugins (see plugins.ts). */
+  cursorPlugins?: ReadLocation[];
   /** VS Code `chat.useCustomizationsInParentRepositories`. */
   copilotParentRepo?: boolean;
   /** `<org>_<account>` of the signed-in claude.ai account: other accounts' synced buckets are skipped. */

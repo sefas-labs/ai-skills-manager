@@ -69,3 +69,31 @@ test('plugins are opt-in at the core level and a missing registry is fine', asyn
   const r = await discover({ ...ctx, homeDir: empty }, BUILTIN_PROVIDERS, { plugins: {} });
   assert.ok(!r.skills.some((s) => s.namespace));
 });
+
+test('Cursor built-in skills and local plugins; claude.ai synced plugins of the signed-in account', async () => {
+  const root = await tempDir();
+  const home = path.join(root, 'home');
+  await writeSkill(path.join(home, '.cursor/skills-cursor'), 'automate');
+  const local = path.join(home, '.cursor/plugins/local/my-plugin');
+  await writeSkill(path.join(local, 'skills'), 'lint-rules');
+  await fs.mkdir(path.join(local, '.cursor-plugin'), { recursive: true });
+  await fs.writeFile(path.join(local, '.cursor-plugin/plugin.json'), JSON.stringify({ name: 'my-plugin' }));
+  const active = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+  const other = 'cccccccc-cccc-cccc-cccc-cccccccccccc_dddddddd-dddd-dddd-dddd-dddddddddddd';
+  await writeSkill(path.join(home, '.claude/plugins/synced', active, 'brand-kit/skills'), 'brand');
+  await writeSkill(path.join(home, '.claude/plugins/synced', active, 'off-kit/skills'), 'hidden-synced');
+  await writeSkill(path.join(home, '.claude/plugins/synced', other, 'old-kit/skills'), 'stale');
+  await fs.mkdir(path.join(home, '.claude'), { recursive: true });
+  await fs.writeFile(path.join(home, '.claude/settings.json'), JSON.stringify({ enabledPlugins: { 'off-kit@synced': false } }));
+  const ctx: DiscoveryContext = { homeDir: home, workspaceFolders: [], platform: 'linux', claudeSyncBucket: active };
+  const r = await discover(ctx, BUILTIN_PROVIDERS, { plugins: {} });
+  const by = (n: string) => r.skills.find((s) => s.name === n);
+  assert.deepEqual(by('automate')!.visibleTo, ['cursor']);
+  assert.equal(by('automate')!.readOnly, true);
+  assert.deepEqual(by('lint-rules')!.visibleTo, ['cursor']);
+  assert.match(by('lint-rules')!.readOnlyReason ?? '', /plugins\/local/);
+  assert.deepEqual(by('brand')!.visibleTo, ['claude-code']);
+  assert.equal(by('brand')!.namespace, 'brand-kit');
+  assert.equal(by('hidden-synced'), undefined, 'disabled with enabledPlugins["off-kit@synced"] = false');
+  assert.equal(by('stale'), undefined, 'other account');
+});

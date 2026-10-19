@@ -54,6 +54,10 @@ export interface CustomizationInput {
   platform: NodeJS.Platform;
   /** VS Code profile `mcp.json` (User/mcp.json), when running in VS Code. */
   vscodeUserMcp?: string;
+  /** VS Code profile folder (…/Code/User), when running in VS Code. */
+  vscodeUserDir?: string;
+  /** VS Code `chat.useNestedAgentsMdFiles` (experimental, off by default). */
+  copilotNestedAgentsMd?: boolean;
   codexHome?: string;
 }
 
@@ -231,6 +235,24 @@ export function codexMcpServers(toml: string): McpServerInfo[] {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'out', 'target', 'vendor', 'venv', '__pycache__', 'coverage']);
+
+/** Sub-folders (not the workspace folder itself) holding CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md or AGENTS.md. Bounded walk. */
+export async function findNestedInstructionDirs(root: string, maxDepth = 6, maxDirs = 5000): Promise<string[]> {
+  const found: string[] = [];
+  let budget = maxDirs;
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth > maxDepth || budget-- <= 0) return;
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    if (depth > 0 && entries.some((e) => (e.isFile() && /^(CLAUDE|CLAUDE\.local|AGENTS)\.md$/.test(e.name)) || (e.isDirectory() && e.name === '.claude'))) {
+      if (entries.some((e) => e.isFile() && /^(CLAUDE|CLAUDE\.local|AGENTS)\.md$/.test(e.name)) || (await exists(path.join(dir, '.claude', 'CLAUDE.md')))) found.push(dir);
+    }
+    for (const e of entries) if (e.isDirectory() && !e.name.startsWith('.') && !SKIP_DIRS.has(e.name)) await walk(path.join(dir, e.name), depth + 1);
+  };
+  await walk(root, 0);
+  return found.sort();
+}
+
 // ---------- inventory ----------
 
 export async function readCustomizations(input: CustomizationInput): Promise<CustomizationItem[]> {
@@ -290,12 +312,33 @@ export async function readCustomizations(input: CustomizationInput): Promise<Cus
     for (const p of await listFiles(path.join(ws, '.cursor', 'rules'), (n) => n.endsWith('.mdc'))) await push({ kind: 'rule', path: p, scope: 'project', agents: ['cursor'] }, true);
     for (const p of await listFiles(path.join(ws, '.github', 'instructions'), (n) => n.endsWith('.instructions.md'))) await push({ kind: 'rule', path: p, scope: 'project', agents: ['copilot'] }, true);
     // --- Subagents and commands ---
-    for (const d of dirs) for (const p of await listFiles(path.join(d, '.claude', 'agents'), (n) => n.endsWith('.md'))) await push({ kind: 'agent', path: p, scope: 'project', agents: ['claude-code'] }, true);
+    // Claude-format subagents are also read by VS Code / Copilot (custom-agents docs).
+    for (const d of dirs) for (const p of await listFiles(path.join(d, '.claude', 'agents'), (n) => n.endsWith('.md'))) await push({ kind: 'agent', path: p, scope: 'project', agents: d === ws ? ['claude-code', 'copilot'] : ['claude-code'] }, true);
+    for (const p of await listFiles(path.join(ws, '.github', 'agents'), (n) => n.endsWith('.md'))) await push({ kind: 'agent', path: p, scope: 'project', agents: ['copilot'], title: path.basename(p).replace(/\.agent\.md$|\.md$/, '') }, true);
     for (const p of await listFiles(path.join(ws, '.claude', 'commands'), (n) => n.endsWith('.md'))) await push({ kind: 'command', path: p, scope: 'project', agents: ['claude-code'], title: '/' + path.basename(p, '.md') }, true);
+    for (const p of await listFiles(path.join(ws, '.github', 'prompts'), (n) => n.endsWith('.prompt.md'))) await push({ kind: 'command', path: p, scope: 'project', agents: ['copilot'], title: '/' + path.basename(p, '.prompt.md'), note: 'Prompt file' }, true);
+
+    // Nested instructions below the workspace folder: loaded when the agent works in that sub-folder.
+    for (const sub of await findNestedInstructionDirs(ws)) {
+      const rel = path.relative(ws, sub).split(path.sep).join('/');
+      for (const f of ['CLAUDE.md', path.join('.claude', 'CLAUDE.md'), 'CLAUDE.local.md']) {
+        const p = path.join(sub, f);
+        if (await exists(p)) await push({ kind: 'instructions', path: p, scope: f === 'CLAUDE.local.md' ? 'local' : 'project', agents: ['claude-code'], note: `Nested: Claude Code loads it when it works in ${rel}/` });
+      }
+      const am = path.join(sub, 'AGENTS.md');
+      if (await exists(am)) {
+        await push({ kind: 'instructions', path: am, scope: 'project', agents: ['cursor', ...(input.copilotNestedAgentsMd ? (['copilot'] as ProviderId[]) : [])], note: `Nested: Cursor combines it for files in ${rel}/${input.copilotNestedAgentsMd ? '' : ' (Copilot only with chat.useNestedAgentsMdFiles)'}` });
+      }
+    }
   }
   for (const p of await listFiles(path.join(home, '.claude', 'rules'), (n) => n.endsWith('.md'))) await push({ kind: 'rule', path: p, scope: 'user', agents: ['claude-code', 'copilot'] }, true);
   for (const p of await listFiles(path.join(home, '.copilot', 'instructions'), (n) => n.endsWith('.md'))) await push({ kind: 'rule', path: p, scope: 'user', agents: ['copilot'] }, true);
-  for (const p of await listFiles(path.join(home, '.claude', 'agents'), (n) => n.endsWith('.md'))) await push({ kind: 'agent', path: p, scope: 'user', agents: ['claude-code'] }, true);
+  for (const p of await listFiles(path.join(home, '.claude', 'agents'), (n) => n.endsWith('.md'))) await push({ kind: 'agent', path: p, scope: 'user', agents: ['claude-code', 'copilot'] }, true);
+  for (const p of await listFiles(path.join(home, '.copilot', 'agents'), (n) => n.endsWith('.md'))) await push({ kind: 'agent', path: p, scope: 'user', agents: ['copilot'], title: path.basename(p).replace(/\.agent\.md$|\.md$/, '') }, true);
+  if (input.vscodeUserDir) {
+    // ⚠️ The profile's prompt folder (User/prompts) is where "Chat: New Prompt File" saves user prompts; not documented as a path.
+    for (const p of await listFiles(path.join(input.vscodeUserDir, 'prompts'), (n) => n.endsWith('.prompt.md'))) await push({ kind: 'command', path: p, scope: 'user', agents: ['copilot'], title: '/' + path.basename(p, '.prompt.md'), note: 'Prompt file (VS Code profile)' }, true);
+  }
   for (const p of await listFiles(path.join(home, '.claude', 'commands'), (n) => n.endsWith('.md'))) await push({ kind: 'command', path: p, scope: 'user', agents: ['claude-code'], title: '/' + path.basename(p, '.md') }, true);
 
   // --- MCP servers ---

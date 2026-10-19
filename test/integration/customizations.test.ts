@@ -87,3 +87,27 @@ test('inventory: instructions, rules, agents, commands and MCP per agent, secret
   const dups = mcpDuplicates(items);
   assert.deepEqual(dups.map((d) => `${d.agent}:${d.name}:${d.files.length}`).sort(), ['claude-code:github:2']);
 });
+
+test('nested CLAUDE.md / AGENTS.md, Copilot prompt files and custom agents', async () => {
+  const root = await tempDir();
+  const home = path.join(root, 'home');
+  const ws = path.join(root, 'ws');
+  await w(path.join(ws, 'apps/web/CLAUDE.md'), 'web');
+  await w(path.join(ws, 'apps/api/AGENTS.md'), 'api');
+  await w(path.join(ws, 'node_modules/x/CLAUDE.md'), 'ignored');
+  await w(path.join(ws, '.github/prompts/release.prompt.md'), '---\ndescription: Write release notes\n---\n');
+  await w(path.join(ws, '.github/agents/planner.agent.md'), '---\ndescription: Plans work\n---\n');
+  await w(path.join(ws, '.claude/agents/reviewer.md'), '---\nname: reviewer\ndescription: Reviews\n---\n');
+  await w(path.join(home, '.copilot/agents/helper.agent.md'), '---\ndescription: Helps\n---\n');
+  const vsUser = path.join(root, 'Code/User');
+  await w(path.join(vsUser, 'prompts/mine.prompt.md'), 'x');
+  const items = await readCustomizations({ homeDir: home, workspaceFolders: [ws], platform: 'linux', vscodeUserDir: vsUser });
+  const rel = (p: string) => path.relative(root, p);
+  const nested = items.filter((i) => i.note?.startsWith('Nested'));
+  assert.deepEqual(nested.map((i) => `${rel(i.path)}:${i.agents.join('+')}`), ['ws/apps/api/AGENTS.md:cursor', 'ws/apps/web/CLAUDE.md:claude-code']);
+  assert.match(nested[1].note!, /apps\/web\//);
+  assert.deepEqual(items.filter((i) => i.kind === 'command').map((i) => `${i.title}:${i.agents}`).sort(), ['/mine:copilot', '/release:copilot']);
+  assert.deepEqual(items.filter((i) => i.kind === 'agent').map((i) => `${i.title}:${i.agents.join('+')}`).sort(), ['helper:copilot', 'planner:copilot', 'reviewer:claude-code+copilot']);
+  const withNested = await readCustomizations({ homeDir: home, workspaceFolders: [ws], platform: 'linux', copilotNestedAgentsMd: true });
+  assert.deepEqual(withNested.find((i) => i.path.endsWith('apps/api/AGENTS.md'))!.agents, ['cursor', 'copilot']);
+});

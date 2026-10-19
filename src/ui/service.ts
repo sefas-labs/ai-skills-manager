@@ -48,7 +48,7 @@ export class SkillsService implements vscode.Disposable {
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.scheduleRefresh()),
       vscode.workspace.onDidGrantWorkspaceTrust(() => this.scheduleRefresh()),
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('skillsManager') || e.affectsConfiguration('chat.useCustomizationsInParentRepositories')) this.scheduleRefresh();
+        if (e.affectsConfiguration('skillsManager') || e.affectsConfiguration('chat.useCustomizationsInParentRepositories') || e.affectsConfiguration('chat.useNestedAgentsMdFiles')) this.scheduleRefresh();
       }),
       // Global folders outside the workspace can appear at any time (another tool installed something).
       vscode.window.onDidChangeWindowState((s) => {
@@ -136,6 +136,8 @@ export class SkillsService implements vscode.Disposable {
         platform: ctx.platform,
         // VS Code keeps the profile's mcp.json next to globalStorage (User/mcp.json); Cursor uses ~/.cursor/mcp.json.
         vscodeUserMcp: this.hostAgent === 'copilot' ? path.join(path.dirname(path.dirname(this.storageDir)), 'mcp.json') : undefined,
+        vscodeUserDir: this.hostAgent === 'copilot' ? path.dirname(path.dirname(this.storageDir)) : undefined,
+        copilotNestedAgentsMd: vscode.workspace.getConfiguration('chat').get<boolean>('useNestedAgentsMdFiles') === true,
         codexHome: process.env.CODEX_HOME,
       }).catch(() => []);
       const installed = Object.entries(agents).filter(([, a]) => a.installed).map(([id]) => id);

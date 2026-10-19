@@ -125,6 +125,8 @@ export const cursor: ProviderAdapter = {
     ...ws(ctx, '.codex/skills'),
     ...nested(ctx, '.agents/skills'),
     ...nested(ctx, '.cursor/skills'),
+    // Built-in skills (⚠️ ~/.cursor/skills-cursor, observed) and local plugins (✅ ~/.cursor/plugins/local).
+    ...(ctx.cursorPlugins ?? []),
     home(ctx, '.agents/skills'),
     home(ctx, '.cursor/skills'),
     home(ctx, '.claude/skills'),

@@ -7,7 +7,7 @@ import { pathKey, tildify } from './paths';
 import { contentFingerprint } from './hashing';
 import { timestamp } from './installer';
 import { expandContext } from './monorepo';
-import { claudePluginSkillRoots } from './plugins';
+import { claudePluginSkillRoots, cursorSkillRoots } from './plugins';
 import { trackedFromGhFrontmatter } from './provenance';
 import { validateSkill } from './validate';
 import type { LockStore } from './lockfile';
@@ -491,8 +491,9 @@ function addIssueOnce(s: SkillRecord, issue: Issue) {
 export async function discover(ctx: DiscoveryContext, adapters: ProviderAdapter[], opts: DiscoverOptions = {}): Promise<DiscoveryResult> {
   if (opts.monorepo) ctx = await expandContext(ctx, opts.monorepo);
   if (opts.plugins) {
-    const roots = await claudePluginSkillRoots({ homeDir: ctx.homeDir, workspaceFolders: ctx.workspaceFolders, platform: ctx.platform, pluginsRoot: opts.plugins.pluginsRoot }).catch(() => []);
-    ctx = { ...ctx, claudePlugins: roots };
+    const syncBucket = ctx.claudeSyncBucket ?? (await readClaudeSyncBucket(ctx.homeDir));
+    const roots = await claudePluginSkillRoots({ homeDir: ctx.homeDir, workspaceFolders: ctx.workspaceFolders, platform: ctx.platform, pluginsRoot: opts.plugins.pluginsRoot, syncBucket }).catch(() => []);
+    ctx = { ...ctx, claudePlugins: roots, cursorPlugins: await cursorSkillRoots(ctx.homeDir).catch(() => []) };
   }
   const locations = resolveLocations(ctx, adapters, opts);
   const perLocation = await Promise.all(locations.map((l) => scanLocation(l, opts, ctx)));

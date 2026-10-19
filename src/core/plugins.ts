@@ -18,8 +18,10 @@ import type { ReadLocation } from './types';
  *    manifest's `defaultEnabled` decides (default true).
  *  - Plugin skills are namespaced (`<plugin>:<skill>`), so they never clash
  *    with your own skills of the same name.
- * Not covered: plugins synced from claude.ai (`plugins/synced/`, layout not
- * documented) and single-skill plugins that keep SKILL.md at their root.
+ * Also (claudeSyncedPluginSkillRoots): plugins synced from claude.ai load as
+ * `<name>@synced` from `plugins/synced/` (documented); inside it we assume the
+ * same per-account bucket layout as synced skills (⚠️ observed, not documented).
+ * Not covered: single-skill plugins that keep SKILL.md at their root.
  */
 export interface PluginRootsInput {
   homeDir: string;
@@ -52,11 +54,11 @@ function enabledMap(settings: Record<string, unknown> | undefined): Record<strin
 
 const isDir = (p: string) => fs.stat(p).then((s) => s.isDirectory(), () => false);
 
-export async function claudePluginSkillRoots(input: PluginRootsInput): Promise<ReadLocation[]> {
+export async function claudePluginSkillRoots(input: PluginRootsInput & { syncBucket?: string }): Promise<ReadLocation[]> {
   const root = input.pluginsRoot || path.join(input.homeDir, '.claude', 'plugins');
   const registry = await readJson(path.join(root, 'installed_plugins.json'));
-  const plugins = registry?.['plugins'];
-  if (!plugins || typeof plugins !== 'object') return [];
+  const registered = registry?.['plugins'];
+  const plugins = registered && typeof registered === 'object' ? (registered as Record<string, unknown>) : {};
 
   const ws = input.workspaceFolders[0];
   const layers = [
@@ -69,7 +71,7 @@ export async function claudePluginSkillRoots(input: PluginRootsInput): Promise<R
 
   const out: ReadLocation[] = [];
   const seen = new Set<string>();
-  for (const [id, installs] of Object.entries(plugins as Record<string, unknown>)) {
+  for (const [id, installs] of Object.entries(plugins)) {
     if (!Array.isArray(installs)) continue;
     for (const inst of installs as Array<Record<string, unknown>>) {
       const installPath = typeof inst['installPath'] === 'string' ? (inst['installPath'] as string) : undefined;
@@ -101,6 +103,58 @@ export async function claudePluginSkillRoots(input: PluginRootsInput): Promise<R
           readOnlyReason: `Installed by the Claude Code plugin "${id}" — manage it with /plugin in Claude Code.`,
         });
       }
+    }
+  }
+  out.push(...(await syncedPluginRoots(root, input.syncBucket, setting)));
+  return out;
+}
+
+/** Skill roots of one plugin directory: `skills/` plus the manifest's extra `skills` directories. */
+async function pluginSkillDirs(pluginDir: string, manifest: Record<string, unknown> | undefined): Promise<string[]> {
+  const extra = manifest?.['skills'];
+  const declared = (Array.isArray(extra) ? extra : typeof extra === 'string' ? [extra] : []).filter((x): x is string => typeof x === 'string');
+  const dirs = [...new Set(['./skills', ...declared].map((rel) => path.resolve(pluginDir, rel)).filter((d) => isPathInside(d, pluginDir, true)))];
+  const ok: string[] = [];
+  for (const d of dirs) if ((await isDir(d)) && !(await fs.access(path.join(d, 'SKILL.md')).then(() => true, () => false))) ok.push(d);
+  return ok;
+}
+
+/** claude.ai plugins: `<plugins root>/synced/<org>_<account>/<plugin>/` of the signed-in account (⚠️ layout observed). */
+async function syncedPluginRoots(root: string, bucket: string | undefined, setting: (id: string) => boolean | undefined): Promise<ReadLocation[]> {
+  if (!bucket) return [];
+  const base = path.join(root, 'synced', bucket);
+  const out: ReadLocation[] = [];
+  for (const e of await fs.readdir(base, { withFileTypes: true }).catch(() => [])) {
+    if (!e.isDirectory() || e.name.startsWith('.')) continue;
+    const dir = path.join(base, e.name);
+    const manifest = await readJson(path.join(dir, '.claude-plugin', 'plugin.json'));
+    const name = typeof manifest?.['name'] === 'string' ? (manifest['name'] as string) : e.name;
+    if (setting(`${name}@synced`) === false || (setting(`${name}@synced`) === undefined && manifest?.['defaultEnabled'] === false)) continue;
+    for (const d of await pluginSkillDirs(dir, manifest)) {
+      out.push({ path: d, scope: 'global', origin: 'plugin', namespace: name, label: `claude.ai plugin ${name}`, readOnly: true, readOnlyReason: 'Synced from claude.ai — manage it on claude.ai or with /plugin.' });
+    }
+  }
+  return out;
+}
+
+/**
+ * Cursor: plugins in `~/.cursor/plugins/local/<plugin>/` (✅ cursor.com/docs/plugins: "put either
+ * plugin format in ~/.cursor/plugins/local") with skills in `skills/<name>/SKILL.md`, and the
+ * built-in skills Cursor ships in `~/.cursor/skills-cursor/` (⚠️ observed: same names as the
+ * "built-in skills" the docs list; the folder itself isn't documented).
+ */
+export async function cursorSkillRoots(homeDir: string): Promise<ReadLocation[]> {
+  const out: ReadLocation[] = [];
+  const builtIn = path.join(homeDir, '.cursor', 'skills-cursor');
+  if (await isDir(builtIn)) out.push({ path: builtIn, scope: 'global', label: 'Cursor built-in skills', readOnly: true, readOnlyReason: 'Built into Cursor — Cursor manages these.' });
+  const local = path.join(homeDir, '.cursor', 'plugins', 'local');
+  for (const e of await fs.readdir(local, { withFileTypes: true }).catch(() => [])) {
+    if (!e.isDirectory() || e.name.startsWith('.')) continue;
+    const dir = path.join(local, e.name);
+    const manifest = (await readJson(path.join(dir, '.cursor-plugin', 'plugin.json'))) ?? (await readJson(path.join(dir, '.claude-plugin', 'plugin.json')));
+    const name = typeof manifest?.['name'] === 'string' ? (manifest['name'] as string) : e.name;
+    for (const d of await pluginSkillDirs(dir, manifest)) {
+      out.push({ path: d, scope: 'global', origin: 'plugin', label: `Cursor plugin ${name} (local)`, readOnly: true, readOnlyReason: `Part of your local Cursor plugin "${name}" — edit it in ~/.cursor/plugins/local.` });
     }
   }
   return out;
