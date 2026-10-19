@@ -41,85 +41,144 @@ export interface MergeSuggestion {
   /** Recommended copies to keep / remove. */
   keep: string[];
   remove: string[];
-  /** After the recommendation: agents that still see two copies, and agents that would lose the skill (always empty unless forced). */
+  /** Agents that would still see two copies after the recommendation. */
   stillTwiceBy: ProviderId[];
   verdict: MergeVerdict;
+}
+
+const SUGGESTION_ID_LENGTH = 12;
+const VERDICT_ORDER: Record<MergeVerdict, number> = { 'remove-redundant': 0, 'unify-versions': 1, expected: 2 };
+
+function sha1(text: string): string {
+  return createHash('sha1').update(text).digest('hex');
+}
+
+/** Duplicates are only merged within one scope (and one workspace folder): never personal vs. project. */
+function groupKey(skill: SkillRecord, location: ResolvedLocation): string {
+  const scopeKey = skill.scope === 'workspace' ? `ws:${location.workspaceFolder ?? ''}` : 'global';
+  return `${scopeKey}|${skill.name}`;
+}
+
+function canBeMerged(skill: SkillRecord, location: ResolvedLocation | undefined): location is ResolvedLocation {
+  if (!location || location.origin === 'nested' || location.namespace) return false;
+  return !skill.issues.some((issue) => issue.code === 'broken-symlink');
+}
+
+/** Links to the same real folder count as one copy. */
+function oneCopyPerRealFolder(skills: SkillRecord[]): SkillRecord[] {
+  const byRealFolder = new Map<string, SkillRecord>();
+  for (const skill of skills) {
+    const key = pathKey(skill.realDir);
+    if (!byRealFolder.has(key)) byRealFolder.set(key, skill);
+  }
+  return [...byRealFolder.values()];
+}
+
+/** Every non-empty subset of `items`. Fine for the handful of copies a skill has. */
+function* nonEmptySubsets<T>(items: T[]): Generator<T[]> {
+  const subsetCount = 2 ** items.length;
+  for (let bits = 1; bits < subsetCount; bits++) {
+    yield items.filter((_, index) => (bits >> index) & 1);
+  }
+}
+
+async function describeCopies(members: SkillRecord[], locationById: Map<string, ResolvedLocation>): Promise<{ copies: MergeCopy[]; versionCount: number }> {
+  const fileShas = await Promise.all(members.map((skill) => localFileShas(skill.realDir).catch(() => new Map<string, string>())));
+  const fingerprints = fileShas.map((shas) => sha1(JSON.stringify([...shas].sort())));
+  const distinctVersions = [...new Set(fingerprints)];
+  const copies = await Promise.all(
+    members.map(async (skill, index) => {
+      const location = locationById.get(skill.locationId)!;
+      const skillFileStat = await fs.stat(path.join(skill.realDir, 'SKILL.md')).catch(() => null);
+      const sameAsFirst = index === 0 || fingerprints[index] === fingerprints[0];
+      return {
+        skillId: skill.id,
+        dir: skill.dir,
+        locationId: location.id,
+        locationLabel: location.label,
+        readers: [...location.readers],
+        writable: !skill.readOnly && !location.readOnly && !skill.managed,
+        version: distinctVersions.indexOf(fingerprints[index]),
+        modifiedAt: skillFileStat?.mtime.toISOString(),
+        diff: sameAsFirst ? undefined : diffFiles(fileShas[0], fileShas[index]),
+      };
+    }),
+  );
+  return { copies, versionCount: distinctVersions.length };
+}
+
+/**
+ * Smallest set of copies that keeps every read-only copy and still reaches the
+ * same agents; on a tie, the one where fewest agents see two copies.
+ */
+function bestCopiesToKeep(copies: MergeCopy[], relevantAgents: Set<ProviderId>): MergeCopy[] {
+  const agentsReached = (selection: MergeCopy[]) =>
+    new Set(selection.flatMap((copy) => copy.readers.filter((reader) => relevantAgents.has(reader))));
+  const agentsSeeingTwice = (selection: MergeCopy[]) => seenTwice(selection, relevantAgents).length;
+  const agentsNeeded = agentsReached(copies).size;
+
+  let best = copies;
+  for (const selection of nonEmptySubsets(copies)) {
+    const dropsReadOnlyCopy = copies.some((copy) => !copy.writable && !selection.includes(copy));
+    if (dropsReadOnlyCopy) continue;
+    if (agentsReached(selection).size < agentsNeeded) continue;
+    const isSmaller = selection.length < best.length;
+    const isEquallySmallButCleaner = selection.length === best.length && agentsSeeingTwice(selection) < agentsSeeingTwice(best);
+    if (isSmaller || isEquallySmallButCleaner) best = selection;
+  }
+  return best;
+}
+
+function seenTwice(selection: MergeCopy[], relevantAgents: Set<ProviderId>): ProviderId[] {
+  return [...relevantAgents].filter((agent) => selection.filter((copy) => copy.readers.includes(agent)).length > 1).sort();
+}
+
+function verdictFor(removeCount: number, identical: boolean): MergeVerdict {
+  if (removeCount > 0) return 'remove-redundant';
+  return identical ? 'expected' : 'unify-versions';
 }
 
 export async function mergeSuggestions(
   skills: SkillRecord[],
   locations: ResolvedLocation[],
-  opts: { relevantAgents?: ProviderId[] } = {},
+  options: { relevantAgents?: ProviderId[] } = {},
 ): Promise<MergeSuggestion[]> {
-  const locById = new Map(locations.map((l) => [l.id, l]));
-  const groups = new Map<string, SkillRecord[]>();
-  for (const s of skills) {
-    const loc = locById.get(s.locationId);
-    if (!loc || loc.origin === 'nested' || loc.namespace || s.issues.some((i) => i.code === 'broken-symlink')) continue;
-    const key = `${s.scope === 'workspace' ? `ws:${loc.workspaceFolder ?? ''}` : 'global'}|${s.name}`;
-    groups.set(key, [...(groups.get(key) ?? []), s]);
+  const locationById = new Map(locations.map((location) => [location.id, location]));
+  const skillsByGroup = new Map<string, SkillRecord[]>();
+  for (const skill of skills) {
+    const location = locationById.get(skill.locationId);
+    if (!canBeMerged(skill, location)) continue;
+    const key = groupKey(skill, location);
+    skillsByGroup.set(key, [...(skillsByGroup.get(key) ?? []), skill]);
   }
 
-  const out: MergeSuggestion[] = [];
-  for (const [key, list] of groups) {
-    // Links to the same real folder are one copy.
-    const byReal = new Map<string, SkillRecord>();
-    for (const s of list) if (!byReal.has(pathKey(s.realDir))) byReal.set(pathKey(s.realDir), s);
-    const members = [...byReal.values()];
+  const suggestions: MergeSuggestion[] = [];
+  for (const [key, sameNameSkills] of skillsByGroup) {
+    const members = oneCopyPerRealFolder(sameNameSkills);
     if (members.length < 2) continue;
 
-    const shas = await Promise.all(members.map((s) => localFileShas(s.realDir).catch(() => new Map<string, string>())));
-    const fingerprint = shas.map((m) => createHash('sha1').update(JSON.stringify([...m].sort())).digest('hex'));
-    const versions = [...new Set(fingerprint)];
-    const copies: MergeCopy[] = await Promise.all(
-      members.map(async (s, i) => {
-        const loc = locById.get(s.locationId)!;
-        const st = await fs.stat(path.join(s.realDir, 'SKILL.md')).catch(() => null);
-        return {
-          skillId: s.id,
-          dir: s.dir,
-          locationId: loc.id,
-          locationLabel: loc.label,
-          readers: [...loc.readers],
-          writable: !s.readOnly && !loc.readOnly && !s.managed,
-          version: versions.indexOf(fingerprint[i]),
-          modifiedAt: st?.mtime.toISOString(),
-          diff: i === 0 || fingerprint[i] === fingerprint[0] ? undefined : diffFiles(shas[0], shas[i]),
-        };
-      }),
-    );
+    const { copies, versionCount } = await describeCopies(members, locationById);
+    const relevantAgents = new Set(options.relevantAgents?.length ? options.relevantAgents : copies.flatMap((copy) => copy.readers));
+    const keep = bestCopiesToKeep(copies, relevantAgents);
+    const remove = copies.filter((copy) => !keep.includes(copy));
+    const identical = versionCount === 1;
+    const verdict = verdictFor(remove.length, identical);
+    const seenTwiceBy = seenTwice(copies, relevantAgents);
+    const nothingToSuggest = verdict === 'expected' && seenTwiceBy.length === 0;
+    if (nothingToSuggest) continue;
 
-    const relevant = new Set(opts.relevantAgents?.length ? opts.relevantAgents : copies.flatMap((c) => c.readers));
-    const reach = (set: MergeCopy[]) => new Set(set.flatMap((c) => c.readers.filter((r) => relevant.has(r))));
-    const twice = (set: MergeCopy[]) => [...relevant].filter((a) => set.filter((c) => c.readers.includes(a)).length > 1).sort();
-    const needed = reach(copies);
-
-    // Smallest subset that keeps every read-only copy and reaches the same agents; fewest double views on ties.
-    let best: MergeCopy[] = copies;
-    for (let mask = 1; mask < 1 << copies.length; mask++) {
-      const set = copies.filter((_, i) => mask & (1 << i));
-      if (copies.some((c) => !c.writable && !set.includes(c))) continue;
-      if (reach(set).size < needed.size) continue;
-      if (set.length < best.length || (set.length === best.length && twice(set).length < twice(best).length)) best = set;
-    }
-    const remove = copies.filter((c) => !best.includes(c));
-    const identical = versions.length === 1;
-    const verdict: MergeVerdict = remove.length ? 'remove-redundant' : identical ? 'expected' : 'unify-versions';
-    const seenTwiceBy = twice(copies);
-    if (verdict === 'expected' && seenTwiceBy.length === 0) continue;
-    out.push({
-      id: createHash('sha1').update(key).digest('hex').slice(0, 12),
+    suggestions.push({
+      id: sha1(key).slice(0, SUGGESTION_ID_LENGTH),
       name: members[0].name,
       scope: members[0].scope,
       copies,
       identical,
       seenTwiceBy,
-      keep: best.map((c) => c.skillId),
-      remove: remove.map((c) => c.skillId),
-      stillTwiceBy: twice(best),
+      keep: keep.map((copy) => copy.skillId),
+      remove: remove.map((copy) => copy.skillId),
+      stillTwiceBy: seenTwice(keep, relevantAgents),
       verdict,
     });
   }
-  const rank: Record<MergeVerdict, number> = { 'remove-redundant': 0, 'unify-versions': 1, expected: 2 };
-  return out.sort((a, b) => rank[a.verdict] - rank[b.verdict] || a.name.localeCompare(b.name));
+  return suggestions.sort((first, second) => VERDICT_ORDER[first.verdict] - VERDICT_ORDER[second.verdict] || first.name.localeCompare(second.name));
 }

@@ -29,56 +29,57 @@ import type { DiscoveryContext, ProviderAdapter, ReadLocation } from '../types';
  *  The editor's workspace folder plays the role of the launch folder / CWD.
  */
 
-const ws = (ctx: DiscoveryContext, rel: string): ReadLocation[] =>
-  ctx.workspaceFolders.map((folder) => ({
-    path: path.join(folder, rel),
+const toPosix = (relativePath: string) => relativePath.split(path.sep).join('/');
+
+const inWorkspaceFolders = (context: DiscoveryContext, relativePath: string): ReadLocation[] =>
+  context.workspaceFolders.map((folder) => ({
+    path: path.join(folder, relativePath),
     scope: 'workspace' as const,
     workspaceFolder: folder,
   }));
 
-/** `rel` in every folder above each workspace folder up to its repo root. */
-const parents = (ctx: DiscoveryContext, rel: string): ReadLocation[] =>
-  ctx.workspaceFolders.flatMap((folder) => {
-    const root = ctx.repoRoots?.[folder];
-    if (!root) return [];
-    return ancestorsUpTo(folder, root).map((dir) => ({
-      path: path.join(dir, rel),
+/** `relativePath` in every folder above each workspace folder up to its repo root. */
+const inParentFolders = (context: DiscoveryContext, relativePath: string): ReadLocation[] =>
+  context.workspaceFolders.flatMap((folder) => {
+    const repoRoot = context.repoRoots?.[folder];
+    if (!repoRoot) return [];
+    return ancestorsUpTo(folder, repoRoot).map((parentDir) => ({
+      path: path.join(parentDir, relativePath),
       scope: 'workspace' as const,
       workspaceFolder: folder,
       origin: 'parent' as const,
-      label: path.relative(folder, path.join(dir, rel)).split(path.sep).join('/'),
+      label: toPosix(path.relative(folder, path.join(parentDir, relativePath))),
     }));
   });
 
-/** `rel` inside every nested sub-folder found below each workspace folder. */
-const nested = (ctx: DiscoveryContext, rel: string): ReadLocation[] =>
-  ctx.workspaceFolders.flatMap((folder) =>
-    (ctx.nestedDirs?.[folder] ?? []).map((sub) => ({
-      path: path.join(folder, sub, rel),
+/** `relativePath` inside every nested sub-folder found below each workspace folder. */
+const inNestedFolders = (context: DiscoveryContext, relativePath: string): ReadLocation[] =>
+  context.workspaceFolders.flatMap((folder) =>
+    (context.nestedDirs?.[folder] ?? []).map((subfolder) => ({
+      path: path.join(folder, subfolder, relativePath),
       scope: 'workspace' as const,
       workspaceFolder: folder,
       origin: 'nested' as const,
-      appliesTo: sub,
+      appliesTo: subfolder,
     })),
   );
 
 /** Only the repo root itself (Copilot's parent-repository setting). */
-const repoRootOnly = (ctx: DiscoveryContext, rels: string[]): ReadLocation[] =>
-  ctx.workspaceFolders.flatMap((folder) => {
-    const root = ctx.repoRoots?.[folder];
-    return root
-      ? rels.map((rel) => ({
-          path: path.join(root, rel),
-          scope: 'workspace' as const,
-          workspaceFolder: folder,
-          origin: 'parent' as const,
-          label: path.relative(folder, path.join(root, rel)).split(path.sep).join('/'),
-        }))
-      : [];
+const inRepoRootOnly = (context: DiscoveryContext, relativePaths: string[]): ReadLocation[] =>
+  context.workspaceFolders.flatMap((folder) => {
+    const repoRoot = context.repoRoots?.[folder];
+    if (!repoRoot) return [];
+    return relativePaths.map((relativePath) => ({
+      path: path.join(repoRoot, relativePath),
+      scope: 'workspace' as const,
+      workspaceFolder: folder,
+      origin: 'parent' as const,
+      label: toPosix(path.relative(folder, path.join(repoRoot, relativePath))),
+    }));
   });
 
-const home = (ctx: DiscoveryContext, rel: string): ReadLocation => ({
-  path: path.join(ctx.homeDir, rel),
+const inHome = (context: DiscoveryContext, relativePath: string): ReadLocation => ({
+  path: path.join(context.homeDir, relativePath),
   scope: 'global',
 });
 
@@ -96,18 +97,18 @@ export const claudeCode: ProviderAdapter = {
   disableHint:
     'Use the `skillOverrides` setting ("off", "name-only", "user-invocable-only") or `disable-model-invocation: true` in the frontmatter.',
   namespacesNested: true,
-  readLocations: (ctx) => [
+  readLocations: (context) => [
     {
-      ...home(ctx, '.claude/skills'),
+      ...inHome(context, '.claude/skills'),
       managedSubdirs: { synced: 'Synced from claude.ai — local edits are overwritten on the next sync.' },
     },
-    ...ws(ctx, '.claude/skills'),
-    ...parents(ctx, '.claude/skills'),
-    ...nested(ctx, '.claude/skills'),
+    ...inWorkspaceFolders(context, '.claude/skills'),
+    ...inParentFolders(context, '.claude/skills'),
+    ...inNestedFolders(context, '.claude/skills'),
     // ✅ 2026-10-19 (skills + managed-settings docs): `.claude/skills` inside the managed settings directory.
-    { path: CLAUDE_MANAGED_SKILLS[ctx.platform] ?? CLAUDE_MANAGED_SKILLS.linux, scope: 'admin', readOnly: true, readOnlyReason: 'Deployed by your organization (Claude Code managed settings).' },
+    { path: CLAUDE_MANAGED_SKILLS[context.platform] ?? CLAUDE_MANAGED_SKILLS.linux, scope: 'admin', readOnly: true, readOnlyReason: 'Deployed by your organization (Claude Code managed settings).' },
     // ✅ 2026-10-19: skills of enabled plugins (namespaced `<plugin>:<skill>`), resolved in plugins.ts.
-    ...(ctx.claudePlugins ?? []),
+    ...(context.claudePlugins ?? []),
   ],
 };
 
@@ -118,19 +119,19 @@ export const cursor: ProviderAdapter = {
   // ✅ 2026-10-19: "Cursor walks the skills root recursively and picks up any SKILL.md it finds".
   recursiveRoots: true,
   disableHint: 'Cursor has no per-skill toggle; `disable-model-invocation: true` makes a skill load only via /skill-name.',
-  readLocations: (ctx) => [
-    ...ws(ctx, '.agents/skills'),
-    ...ws(ctx, '.cursor/skills'),
-    ...ws(ctx, '.claude/skills'),
-    ...ws(ctx, '.codex/skills'),
-    ...nested(ctx, '.agents/skills'),
-    ...nested(ctx, '.cursor/skills'),
+  readLocations: (context) => [
+    ...inWorkspaceFolders(context, '.agents/skills'),
+    ...inWorkspaceFolders(context, '.cursor/skills'),
+    ...inWorkspaceFolders(context, '.claude/skills'),
+    ...inWorkspaceFolders(context, '.codex/skills'),
+    ...inNestedFolders(context, '.agents/skills'),
+    ...inNestedFolders(context, '.cursor/skills'),
     // Built-in skills (⚠️ ~/.cursor/skills-cursor, observed) and local plugins (✅ ~/.cursor/plugins/local).
-    ...(ctx.cursorPlugins ?? []),
-    home(ctx, '.agents/skills'),
-    home(ctx, '.cursor/skills'),
-    home(ctx, '.claude/skills'),
-    home(ctx, '.codex/skills'),
+    ...(context.cursorPlugins ?? []),
+    inHome(context, '.agents/skills'),
+    inHome(context, '.cursor/skills'),
+    inHome(context, '.claude/skills'),
+    inHome(context, '.codex/skills'),
   ],
 };
 
@@ -139,17 +140,17 @@ export const codex: ProviderAdapter = {
   displayName: 'Codex',
   docsUrl: 'https://developers.openai.com/codex/skills',
   disableHint: 'Add a `[[skills.config]]` entry with `path` and `enabled = false` to ~/.codex/config.toml, then restart Codex.',
-  readLocations: (ctx) => {
-    const locs: ReadLocation[] = [...ws(ctx, '.agents/skills'), ...parents(ctx, '.agents/skills'), home(ctx, '.agents/skills')];
-    if (ctx.platform !== 'win32') {
-      locs.push({
+  readLocations: (context) => {
+    const locations: ReadLocation[] = [...inWorkspaceFolders(context, '.agents/skills'), ...inParentFolders(context, '.agents/skills'), inHome(context, '.agents/skills')];
+    if (context.platform !== 'win32') {
+      locations.push({
         path: '/etc/codex/skills',
         scope: 'admin',
         readOnly: true,
         readOnlyReason: 'Admin-managed location.',
       });
     }
-    return locs;
+    return locations;
   },
 };
 
@@ -158,14 +159,14 @@ export const copilot: ProviderAdapter = {
   displayName: 'GitHub Copilot',
   docsUrl: 'https://code.visualstudio.com/docs/agent-customization/agent-skills',
   disableHint: 'Manage per-skill visibility from Chat: Open Customizations → Skills in VS Code.',
-  readLocations: (ctx) => [
-    ...ws(ctx, '.github/skills'),
-    ...ws(ctx, '.claude/skills'),
-    ...ws(ctx, '.agents/skills'),
-    ...(ctx.copilotParentRepo ? repoRootOnly(ctx, ['.github/skills', '.claude/skills', '.agents/skills']) : []),
-    home(ctx, '.copilot/skills'),
-    home(ctx, '.claude/skills'),
-    home(ctx, '.agents/skills'),
+  readLocations: (context) => [
+    ...inWorkspaceFolders(context, '.github/skills'),
+    ...inWorkspaceFolders(context, '.claude/skills'),
+    ...inWorkspaceFolders(context, '.agents/skills'),
+    ...(context.copilotParentRepo ? inRepoRootOnly(context, ['.github/skills', '.claude/skills', '.agents/skills']) : []),
+    inHome(context, '.copilot/skills'),
+    inHome(context, '.claude/skills'),
+    inHome(context, '.agents/skills'),
   ],
 };
 

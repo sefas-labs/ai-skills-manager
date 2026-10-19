@@ -28,8 +28,9 @@ export class LockStore {
       const raw = await fs.readFile(this.file, 'utf8');
       const parsed = JSON.parse(raw) as LockFileShape;
       if (parsed && parsed.version === 1 && parsed.entries && typeof parsed.entries === 'object') this.data = parsed;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+    } catch (error) {
+      const fileMissing = (error as NodeJS.ErrnoException).code === 'ENOENT';
+      if (!fileMissing) {
         // Corrupt lock: keep a copy and start fresh rather than crash.
         await fs.copyFile(this.file, `${this.file}.corrupt-${Date.now()}`).catch(() => undefined);
       }
@@ -59,13 +60,13 @@ export class LockStore {
   }
 
   private save(): Promise<void> {
-    const run = async () => {
+    const writeAtomically = async () => {
       await fs.mkdir(path.dirname(this.file), { recursive: true });
-      const tmp = `${this.file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-      await fs.writeFile(tmp, JSON.stringify(this.data, null, 2), 'utf8');
-      await fs.rename(tmp, this.file);
+      const tempFile = `${this.file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+      await fs.writeFile(tempFile, JSON.stringify(this.data, null, 2), 'utf8');
+      await fs.rename(tempFile, this.file);
     };
-    this.saving = this.saving.then(run, run);
+    this.saving = this.saving.then(writeAtomically, writeAtomically);
     return this.saving;
   }
 }

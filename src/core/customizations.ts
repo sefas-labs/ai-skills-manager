@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { parseFrontmatter } from './frontmatter';
-import { ancestorsUpTo, findRepoRoot } from './monorepo';
+import { ancestorsUpTo, findRepoRoot, shouldWalkInto } from './monorepo';
 import { pathKey } from './paths';
 import type { McpFlavor } from './editing';
 import type { ProviderId } from './types';
@@ -23,6 +23,7 @@ import type { ProviderId } from './types';
  * their names; arguments and URLs that look like credentials are masked.
  */
 export type CustomizationKind = 'instructions' | 'rule' | 'agent' | 'command' | 'mcp';
+export type CustomizationScope = 'project' | 'user' | 'local' | 'admin';
 
 export interface McpServerInfo {
   name: string;
@@ -39,7 +40,7 @@ export interface McpServerInfo {
 export interface CustomizationItem {
   kind: CustomizationKind;
   path: string;
-  scope: 'project' | 'user' | 'local' | 'admin';
+  scope: CustomizationScope;
   agents: ProviderId[];
   /** Short label (file name or name from frontmatter). */
   title: string;
@@ -52,8 +53,6 @@ export interface CustomizationItem {
   /** Why the extension won't write this file (shown instead of edit buttons). */
   readOnlyReason?: string;
 }
-
-const CLAUDE_JSON_REASON = 'Claude Code rewrites ~/.claude.json itself — use `claude mcp add` / `claude mcp remove` in a terminal.';
 
 export interface CustomizationInput {
   homeDir: string;
@@ -68,321 +67,6 @@ export interface CustomizationInput {
   codexHome?: string;
 }
 
-const MANAGED_DIR: Record<string, string> = {
-  darwin: '/Library/Application Support/ClaudeCode',
-  linux: '/etc/claude-code',
-  win32: 'C:\\Program Files\\ClaudeCode',
-};
-
-const exists = (p: string) => fs.stat(p).then((s) => s.isFile() && s.size > 0, () => false);
-
-async function readHead(file: string, max = 64 * 1024): Promise<string> {
-  const fh = await fs.open(file, 'r');
-  try {
-    const buf = Buffer.alloc(max);
-    const { bytesRead } = await fh.read(buf, 0, max, 0);
-    return buf.subarray(0, bytesRead).toString('utf8');
-  } finally {
-    await fh.close();
-  }
-}
-
-async function listFiles(dir: string, match: (name: string) => boolean, depth = 4): Promise<string[]> {
-  const out: string[] = [];
-  const walk = async (d: string, left: number) => {
-    const entries = await fs.readdir(d, { withFileTypes: true }).catch(() => []);
-    for (const e of entries) {
-      if (e.name.startsWith('.')) continue;
-      const p = path.join(d, e.name);
-      if (e.isDirectory() && left > 0) await walk(p, left - 1);
-      else if (e.isFile() && match(e.name)) out.push(p);
-    }
-  };
-  await walk(dir, depth);
-  return out.sort();
-}
-
-async function describeMd(file: string): Promise<{ title?: string; description?: string }> {
-  try {
-    const fm = parseFrontmatter(await readHead(file)).data;
-    return {
-      title: typeof fm['name'] === 'string' ? (fm['name'] as string) : undefined,
-      description: typeof fm['description'] === 'string' ? (fm['description'] as string).slice(0, 300) : undefined,
-    };
-  } catch {
-    return {};
-  }
-}
-
-// ---------- MCP ----------
-
-const SECRET_ARG = /^(sk-|ghp_|gho_|github_pat_|xox[abp]-|AKIA|AIza|ya29\.)|^[A-Za-z0-9_\-]{32,}$|(token|secret|password|api[-_]?key)=/i;
-const SECRET_FLAG = /^--?(token|secret|password|api[-_]?key|key|auth)$/i;
-
-export function maskArgs(args: unknown[]): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = String(args[i]);
-    const prevFlag = i > 0 && SECRET_FLAG.test(String(args[i - 1]));
-    // Connection strings carry passwords in the user info: scheme://user:password@host
-    const masked = a.replace(/(\w[\w+.-]*:\/\/[^/\s:@]*:)[^@\s]+@/g, '$1•••@');
-    out.push(prevFlag || SECRET_ARG.test(a) ? '•••' : masked);
-  }
-  return out;
-}
-
-export function safeUrl(raw: string): string {
-  try {
-    const u = new URL(raw);
-    return `${u.protocol}//${u.host}${u.pathname}${u.search ? '?…' : ''}`;
-  } catch {
-    return '(invalid URL)';
-  }
-}
-
-function serverFromJson(name: string, v: Record<string, unknown>): McpServerInfo {
-  const type = typeof v['type'] === 'string' ? (v['type'] as string) : undefined;
-  const url = typeof v['url'] === 'string' ? (v['url'] as string) : undefined;
-  const command = typeof v['command'] === 'string' ? (v['command'] as string) : undefined;
-  const args = Array.isArray(v['args']) ? v['args'] : [];
-  const transport: McpServerInfo['transport'] =
-    type === 'stdio' || (!type && command) ? 'stdio' : type === 'http' || type === 'streamable-http' || (!type && url) ? 'http' : type === 'sse' ? 'sse' : type === 'ws' ? 'ws' : 'unknown';
-  const keys = (o: unknown) => (o && typeof o === 'object' && !Array.isArray(o) ? Object.keys(o as object).sort() : []);
-  return {
-    name,
-    transport,
-    command: command ? [command, ...maskArgs(args)].join(' ') : undefined,
-    url: url ? safeUrl(url) : undefined,
-    envKeys: keys(v['env']),
-    headerKeys: keys(v['headers']),
-    enabled: v['disabled'] !== true && v['enabled'] !== false,
-  };
-}
-
-async function jsonServers(file: string, key: 'mcpServers' | 'servers', pick?: (root: Record<string, unknown>) => unknown): Promise<McpServerInfo[] | undefined> {
-  let root: Record<string, unknown>;
-  try {
-    root = JSON.parse(await fs.readFile(file, 'utf8'));
-  } catch {
-    return undefined;
-  }
-  const node = pick ? pick(root) : root?.[key];
-  if (!node || typeof node !== 'object' || Array.isArray(node)) return undefined;
-  return Object.entries(node as Record<string, unknown>)
-    .filter(([, v]) => v && typeof v === 'object' && !Array.isArray(v))
-    .map(([n, v]) => serverFromJson(n, v as Record<string, unknown>))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-/** Minimal reader for `[mcp_servers.<name>]` tables in Codex's config.toml (values we show only). */
-export function codexMcpServers(toml: string): McpServerInfo[] {
-  const servers = new Map<string, { command?: string; args: string[]; url?: string; env: Set<string>; headers: Set<string>; enabled: boolean }>();
-  let cur: string | undefined;
-  let sub: 'env' | 'http_headers' | undefined;
-  const str = (v: string) => {
-    const t = v.trim();
-    if (t.startsWith('"')) {
-      try {
-        return JSON.parse(t.replace(/\s+#.*$/, '')) as string;
-      } catch {
-        return undefined;
-      }
-    }
-    return /^'([^']*)'/.exec(t)?.[1];
-  };
-  const lines = toml.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const header = /^\s*\[\s*mcp_servers\.("[^"]+"|[A-Za-z0-9_-]+)(?:\.(env|http_headers))?\s*\]\s*(#.*)?$/.exec(line);
-    if (header) {
-      cur = header[1].replace(/^"|"$/g, '');
-      sub = header[2] as typeof sub;
-      if (!servers.has(cur)) servers.set(cur, { args: [], env: new Set(), headers: new Set(), enabled: true });
-      continue;
-    }
-    if (/^\s*\[/.test(line)) {
-      cur = undefined;
-      continue;
-    }
-    if (!cur) continue;
-    const s = servers.get(cur)!;
-    const kv = /^\s*([A-Za-z0-9_"-]+)\s*=\s*(.*)$/.exec(line);
-    if (!kv) continue;
-    const key = kv[1].replace(/"/g, '');
-    let value = kv[2];
-    if (sub === 'env') {
-      s.env.add(key);
-      continue;
-    }
-    if (sub === 'http_headers') {
-      s.headers.add(key);
-      continue;
-    }
-    if (value.trim().startsWith('[') && !value.includes(']')) {
-      while (i + 1 < lines.length && !lines[i].includes(']')) value += ' ' + lines[++i];
-    }
-    if (key === 'command') s.command = str(value);
-    else if (key === 'url') s.url = str(value);
-    else if (key === 'enabled') s.enabled = !/^\s*false/.test(value);
-    else if (key === 'args') s.args = [...value.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g)].map((m) => (m[1] !== undefined ? JSON.parse(`"${m[1]}"`) : m[2]));
-    else if (key === 'env' && value.trim().startsWith('{')) for (const m of value.matchAll(/([A-Za-z0-9_]+)\s*=/g)) s.env.add(m[1]);
-    else if (key === 'http_headers' && value.trim().startsWith('{')) for (const m of value.matchAll(/"?([A-Za-z0-9_-]+)"?\s*=/g)) s.headers.add(m[1]);
-    else if (key === 'bearer_token_env_var') s.headers.add('Authorization');
-  }
-  return [...servers.entries()]
-    .map(([name, s]) => ({
-      name,
-      transport: s.url ? ('http' as const) : s.command ? ('stdio' as const) : ('unknown' as const),
-      command: s.command ? [s.command, ...maskArgs(s.args)].join(' ') : undefined,
-      url: s.url ? safeUrl(s.url) : undefined,
-      envKeys: [...s.env].sort(),
-      headerKeys: [...s.headers].sort(),
-      enabled: s.enabled,
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'out', 'target', 'vendor', 'venv', '__pycache__', 'coverage']);
-
-/** Sub-folders (not the workspace folder itself) holding CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md or AGENTS.md. Bounded walk. */
-export async function findNestedInstructionDirs(root: string, maxDepth = 6, maxDirs = 5000): Promise<string[]> {
-  const found: string[] = [];
-  let budget = maxDirs;
-  const walk = async (dir: string, depth: number): Promise<void> => {
-    if (depth > maxDepth || budget-- <= 0) return;
-    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-    if (depth > 0 && entries.some((e) => (e.isFile() && /^(CLAUDE|CLAUDE\.local|AGENTS)\.md$/.test(e.name)) || (e.isDirectory() && e.name === '.claude'))) {
-      if (entries.some((e) => e.isFile() && /^(CLAUDE|CLAUDE\.local|AGENTS)\.md$/.test(e.name)) || (await exists(path.join(dir, '.claude', 'CLAUDE.md')))) found.push(dir);
-    }
-    for (const e of entries) if (e.isDirectory() && !e.name.startsWith('.') && !SKIP_DIRS.has(e.name)) await walk(path.join(dir, e.name), depth + 1);
-  };
-  await walk(root, 0);
-  return found.sort();
-}
-
-// ---------- inventory ----------
-
-export async function readCustomizations(input: CustomizationInput): Promise<CustomizationItem[]> {
-  const out: CustomizationItem[] = [];
-  const home = input.homeDir;
-  const ws = input.workspaceFolders[0];
-  const codexHome = input.codexHome || path.join(home, '.codex');
-  const push = async (item: Omit<CustomizationItem, 'title'> & { title?: string }, md = false) => {
-    const d = md ? await describeMd(item.path) : {};
-    out.push({ ...item, title: item.title ?? d.title ?? path.basename(item.path), description: item.description ?? d.description });
-  };
-
-  // --- Instruction files ---
-  const managedClaude = path.join(MANAGED_DIR[input.platform] ?? MANAGED_DIR.linux, 'CLAUDE.md');
-  if (await exists(managedClaude)) await push({ kind: 'instructions', path: managedClaude, scope: 'admin', agents: ['claude-code'], note: 'Organization policy' });
-  if (await exists(path.join(home, '.claude', 'CLAUDE.md'))) await push({ kind: 'instructions', path: path.join(home, '.claude', 'CLAUDE.md'), scope: 'user', agents: ['claude-code', 'copilot'] });
-  for (const f of ['copilot-instructions.md']) {
-    const p = path.join(home, '.copilot', f);
-    if (await exists(p)) await push({ kind: 'instructions', path: p, scope: 'user', agents: ['copilot'] });
-  }
-  for (const f of ['AGENTS.override.md', 'AGENTS.md']) {
-    const p = path.join(codexHome, f);
-    if (await exists(p)) {
-      await push({ kind: 'instructions', path: p, scope: 'user', agents: ['codex'], note: f === 'AGENTS.override.md' ? 'Overrides ~/.codex/AGENTS.md' : undefined });
-      break; // Codex uses only the first non-empty file at this level.
-    }
-  }
-  if (ws) {
-    const root = (await findRepoRoot(ws)) ?? ws;
-    // From the repo root down to the workspace folder (Claude Code loads every level; Codex one file per level).
-    const dirs = [...ancestorsUpTo(ws, root).reverse(), ws];
-    let hasClaudeMd = false;
-    for (const d of dirs) {
-      for (const f of ['CLAUDE.md', path.join('.claude', 'CLAUDE.md'), 'CLAUDE.local.md']) {
-        const p = path.join(d, f);
-        if (await exists(p)) {
-          hasClaudeMd = true;
-          await push({ kind: 'instructions', path: p, scope: f === 'CLAUDE.local.md' ? 'local' : 'project', agents: f === 'CLAUDE.local.md' ? ['claude-code'] : ['claude-code', 'copilot'] });
-        }
-      }
-    }
-    for (const d of dirs) {
-      const override = path.join(d, 'AGENTS.override.md');
-      const agents = path.join(d, 'AGENTS.md');
-      if (await exists(override)) await push({ kind: 'instructions', path: override, scope: 'project', agents: ['codex'], note: 'Codex reads it instead of AGENTS.md here' });
-      if (await exists(agents)) {
-        const readers: ProviderId[] = [...(await exists(override) ? [] : (['codex'] as ProviderId[])), 'cursor', ...(d === ws || d === root ? (['copilot'] as ProviderId[]) : [])];
-        if (!hasClaudeMd) readers.unshift('claude-code');
-        await push({ kind: 'instructions', path: agents, scope: 'project', agents: readers, note: hasClaudeMd ? 'Claude Code reads CLAUDE.md instead (default)' : undefined });
-      }
-    }
-    const gh = path.join(ws, '.github', 'copilot-instructions.md');
-    if (await exists(gh)) await push({ kind: 'instructions', path: gh, scope: 'project', agents: ['copilot'] });
-
-    // --- Rules ---
-    for (const p of await listFiles(path.join(ws, '.claude', 'rules'), (n) => n.endsWith('.md'))) await push({ kind: 'rule', path: p, scope: 'project', agents: ['claude-code', 'copilot'] }, true);
-    for (const p of await listFiles(path.join(ws, '.cursor', 'rules'), (n) => n.endsWith('.mdc'))) await push({ kind: 'rule', path: p, scope: 'project', agents: ['cursor'] }, true);
-    for (const p of await listFiles(path.join(ws, '.github', 'instructions'), (n) => n.endsWith('.instructions.md'))) await push({ kind: 'rule', path: p, scope: 'project', agents: ['copilot'] }, true);
-    // --- Subagents and commands ---
-    // Claude-format subagents are also read by VS Code / Copilot (custom-agents docs).
-    for (const d of dirs) for (const p of await listFiles(path.join(d, '.claude', 'agents'), (n) => n.endsWith('.md'))) await push({ kind: 'agent', path: p, scope: 'project', agents: d === ws ? ['claude-code', 'copilot'] : ['claude-code'] }, true);
-    for (const p of await listFiles(path.join(ws, '.github', 'agents'), (n) => n.endsWith('.md'))) await push({ kind: 'agent', path: p, scope: 'project', agents: ['copilot'], title: path.basename(p).replace(/\.agent\.md$|\.md$/, '') }, true);
-    for (const p of await listFiles(path.join(ws, '.claude', 'commands'), (n) => n.endsWith('.md'))) await push({ kind: 'command', path: p, scope: 'project', agents: ['claude-code'], title: '/' + path.basename(p, '.md') }, true);
-    for (const p of await listFiles(path.join(ws, '.github', 'prompts'), (n) => n.endsWith('.prompt.md'))) await push({ kind: 'command', path: p, scope: 'project', agents: ['copilot'], title: '/' + path.basename(p, '.prompt.md'), note: 'Prompt file' }, true);
-
-    // Nested instructions below the workspace folder: loaded when the agent works in that sub-folder.
-    for (const sub of await findNestedInstructionDirs(ws)) {
-      const rel = path.relative(ws, sub).split(path.sep).join('/');
-      for (const f of ['CLAUDE.md', path.join('.claude', 'CLAUDE.md'), 'CLAUDE.local.md']) {
-        const p = path.join(sub, f);
-        if (await exists(p)) await push({ kind: 'instructions', path: p, scope: f === 'CLAUDE.local.md' ? 'local' : 'project', agents: ['claude-code'], note: `Nested: Claude Code loads it when it works in ${rel}/` });
-      }
-      const am = path.join(sub, 'AGENTS.md');
-      if (await exists(am)) {
-        await push({ kind: 'instructions', path: am, scope: 'project', agents: ['cursor', ...(input.copilotNestedAgentsMd ? (['copilot'] as ProviderId[]) : [])], note: `Nested: Cursor combines it for files in ${rel}/${input.copilotNestedAgentsMd ? '' : ' (Copilot only with chat.useNestedAgentsMdFiles)'}` });
-      }
-    }
-  }
-  for (const p of await listFiles(path.join(home, '.claude', 'rules'), (n) => n.endsWith('.md'))) await push({ kind: 'rule', path: p, scope: 'user', agents: ['claude-code', 'copilot'] }, true);
-  for (const p of await listFiles(path.join(home, '.copilot', 'instructions'), (n) => n.endsWith('.md'))) await push({ kind: 'rule', path: p, scope: 'user', agents: ['copilot'] }, true);
-  for (const p of await listFiles(path.join(home, '.claude', 'agents'), (n) => n.endsWith('.md'))) await push({ kind: 'agent', path: p, scope: 'user', agents: ['claude-code', 'copilot'] }, true);
-  for (const p of await listFiles(path.join(home, '.copilot', 'agents'), (n) => n.endsWith('.md'))) await push({ kind: 'agent', path: p, scope: 'user', agents: ['copilot'], title: path.basename(p).replace(/\.agent\.md$|\.md$/, '') }, true);
-  if (input.vscodeUserDir) {
-    // ⚠️ The profile's prompt folder (User/prompts) is where "Chat: New Prompt File" saves user prompts; not documented as a path.
-    for (const p of await listFiles(path.join(input.vscodeUserDir, 'prompts'), (n) => n.endsWith('.prompt.md'))) await push({ kind: 'command', path: p, scope: 'user', agents: ['copilot'], title: '/' + path.basename(p, '.prompt.md'), note: 'Prompt file (VS Code profile)' }, true);
-  }
-  for (const p of await listFiles(path.join(home, '.claude', 'commands'), (n) => n.endsWith('.md'))) await push({ kind: 'command', path: p, scope: 'user', agents: ['claude-code'], title: '/' + path.basename(p, '.md') }, true);
-
-  // --- MCP servers ---
-  const mcp = async (file: string, scope: CustomizationItem['scope'], agents: ProviderId[], servers: McpServerInfo[] | undefined, note?: string, mcpFlavor?: McpFlavor) => {
-    if (servers?.length) out.push({ kind: 'mcp', path: file, scope, agents, title: path.basename(file), servers, note, mcpFlavor, readOnlyReason: mcpFlavor ? undefined : CLAUDE_JSON_REASON });
-  };
-  const claudeJson = path.join(home, '.claude.json');
-  await mcp(claudeJson, 'user', ['claude-code'], await jsonServers(claudeJson, 'mcpServers'), 'User scope (top-level mcpServers)');
-  if (ws) {
-    await mcp(
-      claudeJson,
-      'local',
-      ['claude-code'],
-      await jsonServers(claudeJson, 'mcpServers', (root) => {
-        const projects = root['projects'] as Record<string, { mcpServers?: unknown }> | undefined;
-        const hit = projects && Object.entries(projects).find(([p]) => pathKey(p, input.platform) === pathKey(ws, input.platform));
-        return hit?.[1]?.mcpServers;
-      }),
-      'Local scope (this project, in ~/.claude.json)',
-    );
-    await mcp(path.join(ws, '.mcp.json'), 'project', ['claude-code', 'copilot'], await jsonServers(path.join(ws, '.mcp.json'), 'mcpServers'), undefined, 'claude');
-    await mcp(path.join(ws, '.cursor', 'mcp.json'), 'project', ['cursor'], await jsonServers(path.join(ws, '.cursor', 'mcp.json'), 'mcpServers'), undefined, 'cursor');
-    await mcp(path.join(ws, '.vscode', 'mcp.json'), 'project', ['copilot'], await jsonServers(path.join(ws, '.vscode', 'mcp.json'), 'servers'), undefined, 'vscode');
-    const codexProject = path.join(ws, '.codex', 'config.toml');
-    const t = await fs.readFile(codexProject, 'utf8').catch(() => undefined);
-    if (t) await mcp(codexProject, 'project', ['codex'], codexMcpServers(t), 'Only for trusted projects', 'codex');
-  }
-  await mcp(path.join(home, '.cursor', 'mcp.json'), 'user', ['cursor'], await jsonServers(path.join(home, '.cursor', 'mcp.json'), 'mcpServers'), undefined, 'cursor');
-  if (input.vscodeUserMcp) await mcp(input.vscodeUserMcp, 'user', ['copilot'], await jsonServers(input.vscodeUserMcp, 'servers'), 'VS Code profile', 'vscode');
-  const copilotCli = path.join(process.env.COPILOT_HOME || path.join(home, '.copilot'), 'mcp-config.json');
-  await mcp(copilotCli, 'user', ['copilot'], await jsonServers(copilotCli, 'mcpServers'), 'Copilot CLI', 'copilot-cli');
-  const codexUser = path.join(codexHome, 'config.toml');
-  const t = await fs.readFile(codexUser, 'utf8').catch(() => undefined);
-  if (t) await mcp(codexUser, 'user', ['codex'], codexMcpServers(t), undefined, 'codex');
-  return out;
-}
-
 export interface McpTarget {
   path: string;
   flavor: McpFlavor;
@@ -391,44 +75,522 @@ export interface McpTarget {
   label: string;
 }
 
+const CLAUDE_JSON_REASON = 'Claude Code rewrites ~/.claude.json itself — use `claude mcp add` / `claude mcp remove` in a terminal.';
+
+const MANAGED_DIR: Record<string, string> = {
+  darwin: '/Library/Application Support/ClaudeCode',
+  linux: '/etc/claude-code',
+  win32: 'C:\\Program Files\\ClaudeCode',
+};
+
+const FRONTMATTER_READ_BYTES = 64 * 1024;
+const MAX_DESCRIPTION_LENGTH = 300;
+const RULE_FOLDER_DEPTH = 4;
+const NESTED_SEARCH_DEPTH = 6;
+const NESTED_SEARCH_MAX_FOLDERS = 5000;
+
+const CLAUDE_MD_VARIANTS = ['CLAUDE.md', path.join('.claude', 'CLAUDE.md'), 'CLAUDE.local.md'];
+const CLAUDE_LOCAL_MD = 'CLAUDE.local.md';
+const INSTRUCTION_FILE_NAME = /^(CLAUDE|CLAUDE\.local|AGENTS)\.md$/;
+const AGENT_FILE_SUFFIX = /\.agent\.md$|\.md$/;
+
+const endsWith = (suffix: string) => (fileName: string) => fileName.endsWith(suffix);
+const isMarkdown = endsWith('.md');
+
+/** True for a non-empty regular file (an empty instructions file loads nothing). */
+const hasContent = (fullPath: string) => fs.stat(fullPath).then((stat) => stat.isFile() && stat.size > 0, () => false);
+
+async function readHead(file: string, maxBytes = FRONTMATTER_READ_BYTES): Promise<string> {
+  const handle = await fs.open(file, 'r');
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, bytesRead).toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
+async function listFiles(dir: string, matches: (fileName: string) => boolean, depth = RULE_FOLDER_DEPTH): Promise<string[]> {
+  const files: string[] = [];
+  const walk = async (currentDir: string, depthLeft: number) => {
+    const entries = await fs.readdir(currentDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const fullPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory() && depthLeft > 0) await walk(fullPath, depthLeft - 1);
+      else if (entry.isFile() && matches(entry.name)) files.push(fullPath);
+    }
+  };
+  await walk(dir, depth);
+  return files.sort();
+}
+
+async function describeMarkdown(file: string): Promise<{ title?: string; description?: string }> {
+  try {
+    const frontmatter = parseFrontmatter(await readHead(file)).data;
+    const name = frontmatter['name'];
+    const description = frontmatter['description'];
+    return {
+      title: typeof name === 'string' ? name : undefined,
+      description: typeof description === 'string' ? description.slice(0, MAX_DESCRIPTION_LENGTH) : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+// ---------- MCP ----------
+
+/** Known token prefixes, long random-looking strings, and `name=value` secrets. */
+const SECRET_ARGUMENT = /^(sk-|ghp_|gho_|github_pat_|xox[abp]-|AKIA|AIza|ya29\.)|^[A-Za-z0-9_\-]{32,}$|(token|secret|password|api[-_]?key)=/i;
+/** Flags whose next argument is a secret (`--token abc`). */
+const SECRET_FLAG = /^--?(token|secret|password|api[-_]?key|key|auth)$/i;
+/** `scheme://user:password@host`: captures everything up to the password. */
+const CONNECTION_STRING_PASSWORD = /(\w[\w+.-]*:\/\/[^/\s:@]*:)[^@\s]+@/g;
+const MASK = '•••';
+
+export function maskArgs(args: unknown[]): string[] {
+  return args.map((rawArgument, index) => {
+    const argument = String(rawArgument);
+    const followsSecretFlag = index > 0 && SECRET_FLAG.test(String(args[index - 1]));
+    if (followsSecretFlag || SECRET_ARGUMENT.test(argument)) return MASK;
+    return argument.replace(CONNECTION_STRING_PASSWORD, `$1${MASK}@`);
+  });
+}
+
+export function safeUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    const hiddenQuery = url.search ? '?…' : '';
+    return `${url.protocol}//${url.host}${url.pathname}${hiddenQuery}`;
+  } catch {
+    return '(invalid URL)';
+  }
+}
+
+function objectKeys(value: unknown): string[] {
+  const isObject = value && typeof value === 'object' && !Array.isArray(value);
+  return isObject ? Object.keys(value as object).sort() : [];
+}
+
+function transportOf(type: string | undefined, hasCommand: boolean, hasUrl: boolean): McpServerInfo['transport'] {
+  if (type === 'stdio' || (!type && hasCommand)) return 'stdio';
+  if (type === 'http' || type === 'streamable-http' || (!type && hasUrl)) return 'http';
+  if (type === 'sse' || type === 'ws') return type;
+  return 'unknown';
+}
+
+function serverFromJson(name: string, entry: Record<string, unknown>): McpServerInfo {
+  const stringOf = (key: string) => (typeof entry[key] === 'string' ? (entry[key] as string) : undefined);
+  const command = stringOf('command');
+  const url = stringOf('url');
+  const args = Array.isArray(entry['args']) ? entry['args'] : [];
+  return {
+    name,
+    transport: transportOf(stringOf('type'), !!command, !!url),
+    command: command ? [command, ...maskArgs(args)].join(' ') : undefined,
+    url: url ? safeUrl(url) : undefined,
+    envKeys: objectKeys(entry['env']),
+    headerKeys: objectKeys(entry['headers']),
+    enabled: entry['disabled'] !== true && entry['enabled'] !== false,
+  };
+}
+
+async function jsonServers(file: string, key: 'mcpServers' | 'servers', pickServers?: (root: Record<string, unknown>) => unknown): Promise<McpServerInfo[] | undefined> {
+  let root: Record<string, unknown>;
+  try {
+    root = JSON.parse(await fs.readFile(file, 'utf8'));
+  } catch {
+    return undefined;
+  }
+  const servers = pickServers ? pickServers(root) : root?.[key];
+  if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return undefined;
+  return Object.entries(servers as Record<string, unknown>)
+    .filter(([, entry]) => entry && typeof entry === 'object' && !Array.isArray(entry))
+    .map(([name, entry]) => serverFromJson(name, entry as Record<string, unknown>))
+    .sort((first, second) => first.name.localeCompare(second.name));
+}
+
+const CODEX_SERVER_HEADER = /^\s*\[\s*mcp_servers\.("[^"]+"|[A-Za-z0-9_-]+)(?:\.(env|http_headers))?\s*\]\s*(#.*)?$/;
+const ANY_TABLE_HEADER = /^\s*\[/;
+const TOML_KEY_VALUE = /^\s*([A-Za-z0-9_"-]+)\s*=\s*(.*)$/;
+const TOML_TRAILING_COMMENT = /\s+#.*$/;
+const TOML_SINGLE_QUOTED = /^'([^']*)'/;
+const TOML_STRING_IN_ARRAY = /"((?:[^"\\]|\\.)*)"|'([^']*)'/g;
+const INLINE_TABLE_KEY = /([A-Za-z0-9_]+)\s*=/g;
+const INLINE_TABLE_QUOTED_KEY = /"?([A-Za-z0-9_-]+)"?\s*=/g;
+
+function readTomlString(rawValue: string): string | undefined {
+  const value = rawValue.trim();
+  if (value.startsWith('"')) {
+    try {
+      return JSON.parse(value.replace(TOML_TRAILING_COMMENT, '')) as string;
+    } catch {
+      return undefined;
+    }
+  }
+  return TOML_SINGLE_QUOTED.exec(value)?.[1];
+}
+
+function readTomlStringArray(rawValue: string): string[] {
+  return [...rawValue.matchAll(TOML_STRING_IN_ARRAY)].map(([, doubleQuoted, singleQuoted]) =>
+    doubleQuoted !== undefined ? (JSON.parse(`"${doubleQuoted}"`) as string) : singleQuoted,
+  );
+}
+
+interface CodexServerDraft {
+  command?: string;
+  args: string[];
+  url?: string;
+  envKeys: Set<string>;
+  headerKeys: Set<string>;
+  enabled: boolean;
+}
+
+/** Minimal reader for `[mcp_servers.<name>]` tables in Codex's config.toml (values we show only). */
+export function codexMcpServers(toml: string): McpServerInfo[] {
+  const drafts = new Map<string, CodexServerDraft>();
+  let currentServer: string | undefined;
+  let currentSubTable: 'env' | 'http_headers' | undefined;
+  const lines = toml.split(/\r?\n/);
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex];
+    const header = CODEX_SERVER_HEADER.exec(line);
+    if (header) {
+      currentServer = header[1].replace(/^"|"$/g, '');
+      currentSubTable = header[2] as typeof currentSubTable;
+      if (!drafts.has(currentServer)) drafts.set(currentServer, { args: [], envKeys: new Set(), headerKeys: new Set(), enabled: true });
+      continue;
+    }
+    if (ANY_TABLE_HEADER.test(line)) {
+      currentServer = undefined;
+      continue;
+    }
+    if (!currentServer) continue;
+    const draft = drafts.get(currentServer)!;
+    const keyValue = TOML_KEY_VALUE.exec(line);
+    if (!keyValue) continue;
+    const key = keyValue[1].replace(/"/g, '');
+    let value = keyValue[2];
+
+    if (currentSubTable === 'env') {
+      draft.envKeys.add(key);
+      continue;
+    }
+    if (currentSubTable === 'http_headers') {
+      draft.headerKeys.add(key);
+      continue;
+    }
+    const startsMultiLineArray = value.trim().startsWith('[') && !value.includes(']');
+    if (startsMultiLineArray) {
+      while (lineIndex + 1 < lines.length && !lines[lineIndex].includes(']')) value += ' ' + lines[++lineIndex];
+    }
+    const isInlineTable = value.trim().startsWith('{');
+    switch (key) {
+      case 'command':
+        draft.command = readTomlString(value);
+        break;
+      case 'url':
+        draft.url = readTomlString(value);
+        break;
+      case 'enabled':
+        draft.enabled = !/^\s*false/.test(value);
+        break;
+      case 'args':
+        draft.args = readTomlStringArray(value);
+        break;
+      case 'env':
+        if (isInlineTable) for (const [, envKey] of value.matchAll(INLINE_TABLE_KEY)) draft.envKeys.add(envKey);
+        break;
+      case 'http_headers':
+        if (isInlineTable) for (const [, headerKey] of value.matchAll(INLINE_TABLE_QUOTED_KEY)) draft.headerKeys.add(headerKey);
+        break;
+      case 'bearer_token_env_var':
+        draft.headerKeys.add('Authorization');
+        break;
+    }
+  }
+
+  return [...drafts.entries()]
+    .map(([name, draft]) => ({
+      name,
+      transport: draft.url ? ('http' as const) : draft.command ? ('stdio' as const) : ('unknown' as const),
+      command: draft.command ? [draft.command, ...maskArgs(draft.args)].join(' ') : undefined,
+      url: draft.url ? safeUrl(draft.url) : undefined,
+      envKeys: [...draft.envKeys].sort(),
+      headerKeys: [...draft.headerKeys].sort(),
+      enabled: draft.enabled,
+    }))
+    .sort((first, second) => first.name.localeCompare(second.name));
+}
+
+/** Sub-folders (not the workspace folder itself) holding CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md or AGENTS.md. Bounded walk. */
+export async function findNestedInstructionDirs(root: string, maxDepth = NESTED_SEARCH_DEPTH, maxDirs = NESTED_SEARCH_MAX_FOLDERS): Promise<string[]> {
+  const found: string[] = [];
+  let foldersLeft = maxDirs;
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth > maxDepth || foldersLeft-- <= 0) return;
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    const isWorkspaceRoot = depth === 0;
+    if (!isWorkspaceRoot) {
+      const hasInstructionFile = entries.some((entry) => entry.isFile() && INSTRUCTION_FILE_NAME.test(entry.name));
+      const hasClaudeFolder = entries.some((entry) => entry.isDirectory() && entry.name === '.claude');
+      if (hasInstructionFile || (hasClaudeFolder && (await hasContent(path.join(dir, '.claude', 'CLAUDE.md'))))) found.push(dir);
+    }
+    for (const entry of entries) {
+      if (shouldWalkInto(entry)) await walk(path.join(dir, entry.name), depth + 1);
+    }
+  };
+  await walk(root, 0);
+  return found.sort();
+}
+
+// ---------- inventory ----------
+
+type NewItem = Omit<CustomizationItem, 'title'> & { title?: string };
+
+class Inventory {
+  readonly items: CustomizationItem[] = [];
+
+  /** Adds an item; with `readFrontmatter`, its title and description come from the file's frontmatter. */
+  async add(item: NewItem, readFrontmatter = false): Promise<void> {
+    const described = readFrontmatter ? await describeMarkdown(item.path) : {};
+    this.items.push({ ...item, title: item.title ?? described.title ?? path.basename(item.path), description: item.description ?? described.description });
+  }
+
+  async addEach(files: string[], item: (file: string) => NewItem): Promise<void> {
+    for (const file of files) await this.add(item(file), true);
+  }
+}
+
+function claudeMdScope(fileName: string): CustomizationScope {
+  return fileName === CLAUDE_LOCAL_MD ? 'local' : 'project';
+}
+
+function claudeMdReaders(fileName: string): ProviderId[] {
+  return fileName === CLAUDE_LOCAL_MD ? ['claude-code'] : ['claude-code', 'copilot'];
+}
+
+function agentFileTitle(file: string): string {
+  return path.basename(file).replace(AGENT_FILE_SUFFIX, '');
+}
+
+function commandTitle(file: string, extension: string): string {
+  return '/' + path.basename(file, extension);
+}
+
+async function addUserInstructions(inventory: Inventory, input: CustomizationInput, codexHome: string): Promise<void> {
+  const home = input.homeDir;
+  const managedClaudeMd = path.join(MANAGED_DIR[input.platform] ?? MANAGED_DIR.linux, 'CLAUDE.md');
+  if (await hasContent(managedClaudeMd)) await inventory.add({ kind: 'instructions', path: managedClaudeMd, scope: 'admin', agents: ['claude-code'], note: 'Organization policy' });
+  const userClaudeMd = path.join(home, '.claude', 'CLAUDE.md');
+  if (await hasContent(userClaudeMd)) await inventory.add({ kind: 'instructions', path: userClaudeMd, scope: 'user', agents: ['claude-code', 'copilot'] });
+  const copilotInstructions = path.join(home, '.copilot', 'copilot-instructions.md');
+  if (await hasContent(copilotInstructions)) await inventory.add({ kind: 'instructions', path: copilotInstructions, scope: 'user', agents: ['copilot'] });
+  // Codex uses only the first non-empty file at this level.
+  for (const fileName of ['AGENTS.override.md', 'AGENTS.md']) {
+    const file = path.join(codexHome, fileName);
+    if (!(await hasContent(file))) continue;
+    const note = fileName === 'AGENTS.override.md' ? 'Overrides ~/.codex/AGENTS.md' : undefined;
+    await inventory.add({ kind: 'instructions', path: file, scope: 'user', agents: ['codex'], note });
+    break;
+  }
+}
+
+/** From the repo root down to the workspace folder: Claude Code loads every level, Codex one file per level. */
+async function addProjectInstructions(inventory: Inventory, workspace: string, levels: string[], repoRoot: string): Promise<void> {
+  let hasClaudeMd = false;
+  for (const dir of levels) {
+    for (const fileName of CLAUDE_MD_VARIANTS) {
+      const file = path.join(dir, fileName);
+      if (!(await hasContent(file))) continue;
+      hasClaudeMd = true;
+      await inventory.add({ kind: 'instructions', path: file, scope: claudeMdScope(fileName), agents: claudeMdReaders(fileName) });
+    }
+  }
+  for (const dir of levels) {
+    const overrideFile = path.join(dir, 'AGENTS.override.md');
+    const agentsFile = path.join(dir, 'AGENTS.md');
+    const hasOverride = await hasContent(overrideFile);
+    if (hasOverride) await inventory.add({ kind: 'instructions', path: overrideFile, scope: 'project', agents: ['codex'], note: 'Codex reads it instead of AGENTS.md here' });
+    if (!(await hasContent(agentsFile))) continue;
+    const isWorkspaceOrRepoRoot = dir === workspace || dir === repoRoot;
+    const readers: ProviderId[] = [...(hasOverride ? [] : ['codex']), 'cursor', ...(isWorkspaceOrRepoRoot ? ['copilot'] : [])];
+    // Claude Code reads AGENTS.md only when there is no CLAUDE.md.
+    if (!hasClaudeMd) readers.unshift('claude-code');
+    await inventory.add({ kind: 'instructions', path: agentsFile, scope: 'project', agents: readers, note: hasClaudeMd ? 'Claude Code reads CLAUDE.md instead (default)' : undefined });
+  }
+  const copilotInstructions = path.join(workspace, '.github', 'copilot-instructions.md');
+  if (await hasContent(copilotInstructions)) await inventory.add({ kind: 'instructions', path: copilotInstructions, scope: 'project', agents: ['copilot'] });
+}
+
+async function addProjectRulesAgentsAndCommands(inventory: Inventory, workspace: string, levels: string[]): Promise<void> {
+  const project = (kind: CustomizationKind, agents: ProviderId[], extra: Partial<NewItem> = {}) => (file: string): NewItem => ({ kind, path: file, scope: 'project', agents, ...extra });
+
+  await inventory.addEach(await listFiles(path.join(workspace, '.claude', 'rules'), isMarkdown), project('rule', ['claude-code', 'copilot']));
+  await inventory.addEach(await listFiles(path.join(workspace, '.cursor', 'rules'), endsWith('.mdc')), project('rule', ['cursor']));
+  await inventory.addEach(await listFiles(path.join(workspace, '.github', 'instructions'), endsWith('.instructions.md')), project('rule', ['copilot']));
+
+  // Claude-format subagents are also read by VS Code / Copilot (custom-agents docs), but only from the workspace folder.
+  for (const dir of levels) {
+    const readers: ProviderId[] = dir === workspace ? ['claude-code', 'copilot'] : ['claude-code'];
+    await inventory.addEach(await listFiles(path.join(dir, '.claude', 'agents'), isMarkdown), project('agent', readers));
+  }
+  for (const file of await listFiles(path.join(workspace, '.github', 'agents'), isMarkdown)) {
+    await inventory.add(project('agent', ['copilot'], { title: agentFileTitle(file) })(file), true);
+  }
+  for (const file of await listFiles(path.join(workspace, '.claude', 'commands'), isMarkdown)) {
+    await inventory.add(project('command', ['claude-code'], { title: commandTitle(file, '.md') })(file), true);
+  }
+  for (const file of await listFiles(path.join(workspace, '.github', 'prompts'), endsWith('.prompt.md'))) {
+    await inventory.add(project('command', ['copilot'], { title: commandTitle(file, '.prompt.md'), note: 'Prompt file' })(file), true);
+  }
+}
+
+/** Instruction files below the workspace folder: loaded when the agent works in that sub-folder. */
+async function addNestedInstructions(inventory: Inventory, workspace: string, copilotReadsNestedAgentsMd: boolean): Promise<void> {
+  for (const subfolder of await findNestedInstructionDirs(workspace)) {
+    const relativeFolder = path.relative(workspace, subfolder).split(path.sep).join('/');
+    for (const fileName of CLAUDE_MD_VARIANTS) {
+      const file = path.join(subfolder, fileName);
+      if (!(await hasContent(file))) continue;
+      await inventory.add({ kind: 'instructions', path: file, scope: claudeMdScope(fileName), agents: ['claude-code'], note: `Nested: Claude Code loads it when it works in ${relativeFolder}/` });
+    }
+    const agentsFile = path.join(subfolder, 'AGENTS.md');
+    if (!(await hasContent(agentsFile))) continue;
+    const readers: ProviderId[] = copilotReadsNestedAgentsMd ? ['cursor', 'copilot'] : ['cursor'];
+    const copilotNote = copilotReadsNestedAgentsMd ? '' : ' (Copilot only with chat.useNestedAgentsMdFiles)';
+    await inventory.add({ kind: 'instructions', path: agentsFile, scope: 'project', agents: readers, note: `Nested: Cursor combines it for files in ${relativeFolder}/${copilotNote}` });
+  }
+}
+
+async function addUserRulesAgentsAndCommands(inventory: Inventory, input: CustomizationInput): Promise<void> {
+  const home = input.homeDir;
+  const user = (kind: CustomizationKind, agents: ProviderId[], extra: Partial<NewItem> = {}) => (file: string): NewItem => ({ kind, path: file, scope: 'user', agents, ...extra });
+
+  await inventory.addEach(await listFiles(path.join(home, '.claude', 'rules'), isMarkdown), user('rule', ['claude-code', 'copilot']));
+  await inventory.addEach(await listFiles(path.join(home, '.copilot', 'instructions'), isMarkdown), user('rule', ['copilot']));
+  await inventory.addEach(await listFiles(path.join(home, '.claude', 'agents'), isMarkdown), user('agent', ['claude-code', 'copilot']));
+  for (const file of await listFiles(path.join(home, '.copilot', 'agents'), isMarkdown)) {
+    await inventory.add(user('agent', ['copilot'], { title: agentFileTitle(file) })(file), true);
+  }
+  if (input.vscodeUserDir) {
+    // ⚠️ The profile's prompt folder (User/prompts) is where "Chat: New Prompt File" saves user prompts; not documented as a path.
+    for (const file of await listFiles(path.join(input.vscodeUserDir, 'prompts'), endsWith('.prompt.md'))) {
+      await inventory.add(user('command', ['copilot'], { title: commandTitle(file, '.prompt.md'), note: 'Prompt file (VS Code profile)' })(file), true);
+    }
+  }
+  for (const file of await listFiles(path.join(home, '.claude', 'commands'), isMarkdown)) {
+    await inventory.add(user('command', ['claude-code'], { title: commandTitle(file, '.md') })(file), true);
+  }
+}
+
+async function readCodexServers(file: string): Promise<McpServerInfo[] | undefined> {
+  const toml = await fs.readFile(file, 'utf8').catch(() => undefined);
+  return toml ? codexMcpServers(toml) : undefined;
+}
+
+function copilotCliMcpFile(home: string): string {
+  return path.join(process.env.COPILOT_HOME || path.join(home, '.copilot'), 'mcp-config.json');
+}
+
+async function addMcpServers(inventory: Inventory, input: CustomizationInput, codexHome: string): Promise<void> {
+  const home = input.homeDir;
+  const workspace = input.workspaceFolders[0];
+  const addFile = (file: string, scope: CustomizationScope, agents: ProviderId[], servers: McpServerInfo[] | undefined, note?: string, mcpFlavor?: McpFlavor) => {
+    if (!servers?.length) return;
+    const readOnlyReason = mcpFlavor ? undefined : CLAUDE_JSON_REASON;
+    inventory.items.push({ kind: 'mcp', path: file, scope, agents, title: path.basename(file), servers, note, mcpFlavor, readOnlyReason });
+  };
+
+  const claudeJson = path.join(home, '.claude.json');
+  addFile(claudeJson, 'user', ['claude-code'], await jsonServers(claudeJson, 'mcpServers'), 'User scope (top-level mcpServers)');
+  if (workspace) {
+    const thisProjectServers = (root: Record<string, unknown>) => {
+      const projects = root['projects'] as Record<string, { mcpServers?: unknown }> | undefined;
+      const entry = projects && Object.entries(projects).find(([projectPath]) => pathKey(projectPath, input.platform) === pathKey(workspace, input.platform));
+      return entry?.[1]?.mcpServers;
+    };
+    addFile(claudeJson, 'local', ['claude-code'], await jsonServers(claudeJson, 'mcpServers', thisProjectServers), 'Local scope (this project, in ~/.claude.json)');
+    const projectMcp = path.join(workspace, '.mcp.json');
+    const cursorMcp = path.join(workspace, '.cursor', 'mcp.json');
+    const vscodeMcp = path.join(workspace, '.vscode', 'mcp.json');
+    const codexProject = path.join(workspace, '.codex', 'config.toml');
+    addFile(projectMcp, 'project', ['claude-code', 'copilot'], await jsonServers(projectMcp, 'mcpServers'), undefined, 'claude');
+    addFile(cursorMcp, 'project', ['cursor'], await jsonServers(cursorMcp, 'mcpServers'), undefined, 'cursor');
+    addFile(vscodeMcp, 'project', ['copilot'], await jsonServers(vscodeMcp, 'servers'), undefined, 'vscode');
+    addFile(codexProject, 'project', ['codex'], await readCodexServers(codexProject), 'Only for trusted projects', 'codex');
+  }
+  const cursorUserMcp = path.join(home, '.cursor', 'mcp.json');
+  addFile(cursorUserMcp, 'user', ['cursor'], await jsonServers(cursorUserMcp, 'mcpServers'), undefined, 'cursor');
+  if (input.vscodeUserMcp) addFile(input.vscodeUserMcp, 'user', ['copilot'], await jsonServers(input.vscodeUserMcp, 'servers'), 'VS Code profile', 'vscode');
+  const copilotCli = copilotCliMcpFile(home);
+  addFile(copilotCli, 'user', ['copilot'], await jsonServers(copilotCli, 'mcpServers'), 'Copilot CLI', 'copilot-cli');
+  const codexUser = path.join(codexHome, 'config.toml');
+  addFile(codexUser, 'user', ['codex'], await readCodexServers(codexUser), undefined, 'codex');
+}
+
+export async function readCustomizations(input: CustomizationInput): Promise<CustomizationItem[]> {
+  const inventory = new Inventory();
+  const workspace = input.workspaceFolders[0];
+  const codexHome = input.codexHome || path.join(input.homeDir, '.codex');
+
+  await addUserInstructions(inventory, input, codexHome);
+  if (workspace) {
+    const repoRoot = (await findRepoRoot(workspace)) ?? workspace;
+    const levelsFromRepoRoot = [...ancestorsUpTo(workspace, repoRoot).reverse(), workspace];
+    await addProjectInstructions(inventory, workspace, levelsFromRepoRoot, repoRoot);
+    await addProjectRulesAgentsAndCommands(inventory, workspace, levelsFromRepoRoot);
+    await addNestedInstructions(inventory, workspace, !!input.copilotNestedAgentsMd);
+  }
+  await addUserRulesAgentsAndCommands(inventory, input);
+  await addMcpServers(inventory, input, codexHome);
+  return inventory.items;
+}
+
 /** Files a new MCP server can be written to (they may not exist yet). Claude Code's user/local scopes live in ~/.claude.json: not offered. */
 export function mcpTargets(input: CustomizationInput): McpTarget[] {
-  const ws = input.workspaceFolders[0];
+  const workspace = input.workspaceFolders[0];
   const home = input.homeDir;
   const codexHome = input.codexHome || path.join(home, '.codex');
-  const out: McpTarget[] = [];
-  if (ws) {
-    out.push(
-      { path: path.join(ws, '.mcp.json'), flavor: 'claude', scope: 'project', agents: ['claude-code', 'copilot'], label: 'Claude Code (project, shared)' },
-      { path: path.join(ws, '.cursor', 'mcp.json'), flavor: 'cursor', scope: 'project', agents: ['cursor'], label: 'Cursor (project)' },
-      { path: path.join(ws, '.vscode', 'mcp.json'), flavor: 'vscode', scope: 'project', agents: ['copilot'], label: 'VS Code / Copilot (project)' },
-      { path: path.join(ws, '.codex', 'config.toml'), flavor: 'codex', scope: 'project', agents: ['codex'], label: 'Codex (project, trusted projects only)' },
+  const targets: McpTarget[] = [];
+  if (workspace) {
+    targets.push(
+      { path: path.join(workspace, '.mcp.json'), flavor: 'claude', scope: 'project', agents: ['claude-code', 'copilot'], label: 'Claude Code (project, shared)' },
+      { path: path.join(workspace, '.cursor', 'mcp.json'), flavor: 'cursor', scope: 'project', agents: ['cursor'], label: 'Cursor (project)' },
+      { path: path.join(workspace, '.vscode', 'mcp.json'), flavor: 'vscode', scope: 'project', agents: ['copilot'], label: 'VS Code / Copilot (project)' },
+      { path: path.join(workspace, '.codex', 'config.toml'), flavor: 'codex', scope: 'project', agents: ['codex'], label: 'Codex (project, trusted projects only)' },
     );
   }
-  out.push({ path: path.join(home, '.cursor', 'mcp.json'), flavor: 'cursor', scope: 'user', agents: ['cursor'], label: 'Cursor (user)' });
-  if (input.vscodeUserMcp) out.push({ path: input.vscodeUserMcp, flavor: 'vscode', scope: 'user', agents: ['copilot'], label: 'VS Code / Copilot (user profile)' });
-  out.push(
-    { path: path.join(process.env.COPILOT_HOME || path.join(home, '.copilot'), 'mcp-config.json'), flavor: 'copilot-cli', scope: 'user', agents: ['copilot'], label: 'Copilot CLI (user)' },
+  targets.push({ path: path.join(home, '.cursor', 'mcp.json'), flavor: 'cursor', scope: 'user', agents: ['cursor'], label: 'Cursor (user)' });
+  if (input.vscodeUserMcp) targets.push({ path: input.vscodeUserMcp, flavor: 'vscode', scope: 'user', agents: ['copilot'], label: 'VS Code / Copilot (user profile)' });
+  targets.push(
+    { path: copilotCliMcpFile(home), flavor: 'copilot-cli', scope: 'user', agents: ['copilot'], label: 'Copilot CLI (user)' },
     { path: path.join(codexHome, 'config.toml'), flavor: 'codex', scope: 'user', agents: ['codex'], label: 'Codex (user)' },
   );
-  return out;
+  return targets;
 }
 
 /** MCP server names configured more than once for the same agent (which one wins depends on the agent). */
 export function mcpDuplicates(items: CustomizationItem[]): Array<{ agent: ProviderId; name: string; files: string[] }> {
-  const seen = new Map<string, Set<string>>();
-  for (const it of items.filter((i) => i.kind === 'mcp')) {
-    for (const s of it.servers ?? []) {
-      for (const a of it.agents) {
-        const k = `${a}\u0000${s.name}`;
-        seen.set(k, (seen.get(k) ?? new Set()).add(it.path + (it.note?.startsWith('Local') ? '#local' : '')));
+  const filesByAgentAndServer = new Map<string, Set<string>>();
+  const keySeparator = '\u0000';
+  for (const item of items.filter((candidate) => candidate.kind === 'mcp')) {
+    // ~/.claude.json holds both user and local scopes: tell them apart.
+    const fileKey = item.path + (item.note?.startsWith('Local') ? '#local' : '');
+    for (const server of item.servers ?? []) {
+      for (const agent of item.agents) {
+        const key = `${agent}${keySeparator}${server.name}`;
+        filesByAgentAndServer.set(key, (filesByAgentAndServer.get(key) ?? new Set()).add(fileKey));
       }
     }
   }
-  return [...seen.entries()]
+  return [...filesByAgentAndServer.entries()]
     .filter(([, files]) => files.size > 1)
-    .map(([k, files]) => {
-      const [agent, name] = k.split('\u0000');
+    .map(([key, files]) => {
+      const [agent, name] = key.split(keySeparator);
       return { agent, name, files: [...files] };
     });
 }

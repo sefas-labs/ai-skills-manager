@@ -1,3 +1,4 @@
+import { mapWithConcurrency } from './concurrency';
 import { parseFrontmatter } from './frontmatter';
 import { GitHubClient, parseGitHubUrl } from './github';
 import { findSkillDirs } from './installer';
@@ -16,7 +17,7 @@ export interface CatalogSource {
   blurb: string;
 }
 
-/** Verified to exist and contain SKILL.md folders on 2026-10-19 (counts as of that day; NVIDIA/skills on 2026-10-19 too: Apache-2.0, 418 SKILL.md). */
+/** Verified to exist and contain SKILL.md folders on 2026-10-19 (counts as of that day; NVIDIA/skills: Apache-2.0, 418 SKILL.md). */
 export const FEATURED_SOURCES: CatalogSource[] = [
   { id: 'anthropics/skills', owner: 'anthropics', repo: 'skills', title: 'Anthropic', blurb: 'Anthropic’s public Agent Skills (documents, design, development) — ~20 skills.' },
   { id: 'openai/skills', owner: 'openai', repo: 'skills', title: 'OpenAI', blurb: 'Skills catalog for Codex — ~40 skills.' },
@@ -42,41 +43,64 @@ export interface CatalogSkill {
   url: string;
 }
 
-/** name/description of a SKILL.md by blob SHA (content-addressed, so never stale). */
-export type DescriptionCache = Map<string, { name?: string; description?: string }>;
+interface SkillSummary {
+  name?: string;
+  description?: string;
+}
 
-async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array(items.length);
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(n, items.length) }, async () => {
-      while (next < items.length) {
-        const i = next++;
-        out[i] = await fn(items[i]);
-      }
-    }),
-  );
-  return out;
+/** name/description of a SKILL.md by blob SHA (content-addressed, so never stale). */
+export type DescriptionCache = Map<string, SkillSummary>;
+
+const SKILL_FILE_NAME = 'SKILL.md';
+/** Same limit as install and discovery. */
+const MAX_SKILL_MD_BYTES = 1024 * 1024;
+const MAX_DESCRIPTION_LENGTH = 600;
+const DEFAULT_MAX_SKILLS_PER_SOURCE = 600;
+const DEFAULT_CONCURRENCY = 8;
+const MIN_QUERY_LENGTH = 2;
+/** raw.githubusercontent.com and the API both read HEAD as the default branch. */
+const DEFAULT_BRANCH_REF = 'HEAD';
+const DEPENDENCY_OR_VCS_PATH = /(^|\/)(node_modules|\.git)\//;
+const NAME_MATCH_SCORE = 10;
+const DESCRIPTION_MATCH_SCORE = 1;
+
+function skillMdPath(dir: string): string {
+  return dir ? `${dir}/${SKILL_FILE_NAME}` : SKILL_FILE_NAME;
+}
+
+function skillDirOf(filePath: string): string {
+  return filePath === SKILL_FILE_NAME ? '' : filePath.slice(0, -`/${SKILL_FILE_NAME}`.length);
+}
+
+function folderUrl(owner: string, repo: string, ref: string, dir: string): string {
+  const dirInUrl = dir ? '/' + dir : '';
+  return `https://github.com/${owner}/${repo}/tree/${ref}${dirInUrl}`;
+}
+
+function fallbackName(dir: string, repo: string): string {
+  return dir.split('/').pop() || repo;
 }
 
 async function describe(
   client: GitHubClient,
   cache: DescriptionCache,
   at: { owner: string; repo: string; ref: string },
-  path: string,
-  sha: string,
-): Promise<{ name?: string; description?: string }> {
-  const hit = cache.get(sha);
-  if (hit) return hit;
+  filePath: string,
+  blobSha: string,
+): Promise<SkillSummary> {
+  const cached = cache.get(blobSha);
+  if (cached) return cached;
   try {
-    const buf = await client.file(at.owner, at.repo, at.ref, path, 1024 * 1024); // same limit as install/discovery
-    const fm = parseFrontmatter(Buffer.from(buf).toString('utf8')).data;
-    const v = {
-      name: typeof fm['name'] === 'string' ? (fm['name'] as string) : undefined,
-      description: typeof fm['description'] === 'string' ? (fm['description'] as string).trim().slice(0, 600) : undefined,
+    const bytes = await client.file(at.owner, at.repo, at.ref, filePath, MAX_SKILL_MD_BYTES);
+    const frontmatter = parseFrontmatter(Buffer.from(bytes).toString('utf8')).data;
+    const name = frontmatter['name'];
+    const description = frontmatter['description'];
+    const summary = {
+      name: typeof name === 'string' ? name : undefined,
+      description: typeof description === 'string' ? description.trim().slice(0, MAX_DESCRIPTION_LENGTH) : undefined,
     };
-    cache.set(sha, v);
-    return v;
+    cache.set(blobSha, summary);
+    return summary;
   } catch {
     return {};
   }
@@ -85,62 +109,72 @@ async function describe(
 /** Skills of one collection: 3 API calls (repo, commit, tree) plus raw SKILL.md downloads not already cached. */
 export async function listSource(
   client: GitHubClient,
-  src: CatalogSource,
+  source: CatalogSource,
   cache: DescriptionCache,
-  opts: { concurrency?: number; limit?: number } = {},
+  options: { concurrency?: number; limit?: number } = {},
 ): Promise<{ ref: string; commit: string; skills: CatalogSkill[]; truncated: boolean }> {
-  const { ref, commit } = await client.resolve(parseGitHubUrl(`${src.owner}/${src.repo}`));
-  const { entries, truncated } = await client.tree(src.owner, src.repo, commit);
-  const shaByPath = new Map(entries.filter((e) => e.type === 'blob').map((e) => [e.path, e.sha]));
-  const dirs = findSkillDirs(entries).slice(0, opts.limit ?? 600);
-  const skills = await pool(dirs, opts.concurrency ?? 8, async (dir) => {
-    const path = dir ? `${dir}/SKILL.md` : 'SKILL.md';
-    const sha = shaByPath.get(path)!;
-    const d = await describe(client, cache, { owner: src.owner, repo: src.repo, ref: commit }, path, sha);
+  const { owner, repo } = source;
+  const { ref, commit } = await client.resolve(parseGitHubUrl(`${owner}/${repo}`));
+  const { entries, truncated } = await client.tree(owner, repo, commit);
+  const blobShaByPath = new Map(entries.filter((entry) => entry.type === 'blob').map((entry) => [entry.path, entry.sha]));
+  const skillDirs = findSkillDirs(entries).slice(0, options.limit ?? DEFAULT_MAX_SKILLS_PER_SOURCE);
+  const skills = await mapWithConcurrency(skillDirs, options.concurrency ?? DEFAULT_CONCURRENCY, async (dir) => {
+    const filePath = skillMdPath(dir);
+    const blobSha = blobShaByPath.get(filePath)!;
+    const summary = await describe(client, cache, { owner, repo, ref: commit }, filePath, blobSha);
     return {
-      sourceId: src.id,
-      owner: src.owner,
-      repo: src.repo,
+      sourceId: source.id,
+      owner,
+      repo,
       dir,
-      name: d.name ?? (dir.split('/').pop() || src.repo),
-      description: d.description,
-      skillMdSha: sha,
-      url: `https://github.com/${src.owner}/${src.repo}/tree/${ref}${dir ? '/' + dir : ''}`,
+      name: summary.name ?? fallbackName(dir, repo),
+      description: summary.description,
+      skillMdSha: blobSha,
+      url: folderUrl(owner, repo, ref, dir),
     };
   });
-  skills.sort((a, b) => a.name.localeCompare(b.name) || a.dir.localeCompare(b.dir));
+  skills.sort((first, second) => first.name.localeCompare(second.name) || first.dir.localeCompare(second.dir));
   return { ref, commit, skills, truncated };
+}
+
+type SearchHit = { owner: string; repo: string; path: string; sha: string };
+
+function uniqueHits(hits: SearchHit[]): SearchHit[] {
+  const seen = new Set<string>();
+  return hits.filter((hit) => {
+    const key = `${hit.owner}/${hit.repo}/${hit.path}`.toLowerCase();
+    if (seen.has(key) || DEPENDENCY_OR_VCS_PATH.test(hit.path)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** Drops SKILL.md files that sit inside another skill of the same repository. */
+function outermostSkills(hits: SearchHit[]): SearchHit[] {
+  const isInside = (inner: SearchHit, outer: SearchHit) => {
+    if (inner === outer || inner.owner !== outer.owner || inner.repo !== outer.repo) return false;
+    const outerDir = skillDirOf(outer.path);
+    return outerDir === '' || skillDirOf(inner.path).startsWith(outerDir + '/');
+  };
+  return hits.filter((hit) => !hits.some((other) => isInside(hit, other)));
 }
 
 /** Search every public repo (needs a GitHub sign-in). One code-search call + raw SKILL.md downloads. */
 export async function searchGitHub(client: GitHubClient, query: string, cache: DescriptionCache): Promise<CatalogSkill[]> {
-  if (query.trim().length < 2) return [];
-  const hits = await client.searchSkillFiles(query);
-  // Same skill folder can't appear twice; nested SKILL.md files (inside another skill) are skipped.
-  const seen = new Set<string>();
-  const unique = hits.filter((h) => {
-    const k = `${h.owner}/${h.repo}/${h.path}`.toLowerCase();
-    if (seen.has(k) || /(^|\/)(node_modules|\.git)\//.test(h.path)) return false;
-    seen.add(k);
-    return true;
-  });
-  const dirOf = (path: string) => (path === 'SKILL.md' ? '' : path.slice(0, -'/SKILL.md'.length));
-  const outer = unique.filter(
-    (h) => !unique.some((o) => o !== h && o.owner === h.owner && o.repo === h.repo && (dirOf(o.path) === '' || dirOf(h.path).startsWith(dirOf(o.path) + '/'))),
-  );
-  const found = await pool(outer, 8, async (h) => {
-    const dir = dirOf(h.path);
-    // HEAD = the default branch; raw.githubusercontent.com and the API both accept it.
-    const d = await describe(client, cache, { owner: h.owner, repo: h.repo, ref: 'HEAD' }, h.path, h.sha);
+  if (query.trim().length < MIN_QUERY_LENGTH) return [];
+  const hits = outermostSkills(uniqueHits(await client.searchSkillFiles(query)));
+  const found = await mapWithConcurrency(hits, DEFAULT_CONCURRENCY, async (hit) => {
+    const dir = skillDirOf(hit.path);
+    const summary = await describe(client, cache, { owner: hit.owner, repo: hit.repo, ref: DEFAULT_BRANCH_REF }, hit.path, hit.sha);
     return {
-      sourceId: `${h.owner}/${h.repo}`,
-      owner: h.owner,
-      repo: h.repo,
+      sourceId: `${hit.owner}/${hit.repo}`,
+      owner: hit.owner,
+      repo: hit.repo,
       dir,
-      name: d.name ?? (dir.split('/').pop() || h.repo),
-      description: d.description,
-      skillMdSha: h.sha,
-      url: `https://github.com/${h.owner}/${h.repo}/tree/HEAD${dir ? '/' + dir : ''}`,
+      name: summary.name ?? fallbackName(dir, hit.repo),
+      description: summary.description,
+      skillMdSha: hit.sha,
+      url: folderUrl(hit.owner, hit.repo, DEFAULT_BRANCH_REF, dir),
     };
   });
   return rankByQuery(found, query);
@@ -149,10 +183,17 @@ export async function searchGitHub(client: GitHubClient, query: string, cache: D
 /** Like `gh skill search`: name matches first, then description matches, then the rest (stable). */
 export function rankByQuery<T extends { name: string; description?: string }>(items: T[], query: string): T[] {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const score = (s: T) => {
-    const name = s.name.toLowerCase();
-    const desc = (s.description ?? '').toLowerCase();
-    return words.reduce((n, w) => n + (name.includes(w) ? 10 : 0) + (desc.includes(w) ? 1 : 0), 0);
+  const scoreOf = (item: T) => {
+    const name = item.name.toLowerCase();
+    const description = (item.description ?? '').toLowerCase();
+    return words.reduce((score, word) => {
+      const nameScore = name.includes(word) ? NAME_MATCH_SCORE : 0;
+      const descriptionScore = description.includes(word) ? DESCRIPTION_MATCH_SCORE : 0;
+      return score + nameScore + descriptionScore;
+    }, 0);
   };
-  return items.map((s, i) => ({ s, i, k: score(s) })).sort((a, b) => b.k - a.k || a.i - b.i).map((x) => x.s);
+  return items
+    .map((item, originalIndex) => ({ item, originalIndex, score: scoreOf(item) }))
+    .sort((first, second) => second.score - first.score || first.originalIndex - second.originalIndex)
+    .map((ranked) => ranked.item);
 }

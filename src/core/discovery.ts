@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { parseFrontmatter } from './frontmatter';
 import { pathKey, tildify } from './paths';
 import { contentFingerprint } from './hashing';
-import { timestamp } from './installer';
+import { timestamp } from './safeWrite';
 import { expandContext } from './monorepo';
 import { claudePluginSkillRoots, cursorSkillRoots } from './plugins';
 import { trackedFromGhFrontmatter } from './provenance';
@@ -23,8 +23,31 @@ import type {
   SkillRecord,
 } from './types';
 
+const SKILL_FILE_NAME = 'SKILL.md';
 const MAX_SKILL_MD_BYTES = 1024 * 1024;
 const MAX_ENTRIES_PER_LOCATION = 2000;
+const LOCATION_ID_LENGTH = 12;
+const SKILL_ID_LENGTH = 16;
+/** Synced skills sit in `synced/<skill>` or one level deeper, in `synced/<account bucket>/<skill>`. */
+const MANAGED_SCAN_DEPTH = 2;
+/** Cursor finds skills inside category folders up to this many levels deep. */
+const CATEGORY_SCAN_DEPTH = 3;
+/** Frontmatter `metadata` keys that other tools use to record where a skill came from. */
+const SOURCE_METADATA_KEY = /repo|source|github|origin/i;
+
+const SCOPE_ORDER = { workspace: 0, global: 1, admin: 2 } as const;
+
+const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+/** `<organizationUuid>_<accountUuid>`: one synced folder per claude.ai account (observed, not documented). */
+const SYNC_BUCKET_NAME = new RegExp(`^${UUID_PATTERN}_${UUID_PATTERN}$`, 'i');
+
+type NotASkill = 'not-a-skill';
+const NOT_A_SKILL: NotASkill = 'not-a-skill';
+
+interface ReadOnlyInfo {
+  readOnly: boolean;
+  readOnlyReason?: string;
+}
 
 export interface DiscoverOptions {
   lock?: LockStore;
@@ -38,75 +61,100 @@ export interface DiscoverOptions {
   monorepo?: { parents: boolean; nested: boolean };
 }
 
+function shortHash(text: string, length: number): string {
+  return createHash('sha1').update(text).digest('hex').slice(0, length);
+}
+
+function skillIdFor(entryPath: string): string {
+  return shortHash(pathKey(entryPath), SKILL_ID_LENGTH);
+}
+
+function isHidden(name: string): boolean {
+  return name.startsWith('.');
+}
+
+function toPosix(relativePath: string): string {
+  return relativePath.split(path.sep).join('/');
+}
+
 /** Merges every adapter's declared directories into one list keyed by real path. */
 export function resolveLocations(
-  ctx: DiscoveryContext,
+  context: DiscoveryContext,
   adapters: ProviderAdapter[],
-  opts: DiscoverOptions = {},
+  options: DiscoverOptions = {},
 ): ResolvedLocation[] {
-  const byKey = new Map<string, ResolvedLocation>();
-  const add = (loc: ReadLocation, reader: string, recursive = false) => {
-    const abs = path.resolve(loc.path);
-    const key = pathKey(abs, ctx.platform);
-    let r = byKey.get(key);
-    if (!r) {
-      r = {
-        id: createHash('sha1').update(key).digest('hex').slice(0, 12),
-        path: abs,
-        label: loc.label ?? labelFor(abs, ctx),
-        scope: loc.scope,
+  const locationsByKey = new Map<string, ResolvedLocation>();
+
+  const addLocation = (declared: ReadLocation, reader: string, readsRecursively = false) => {
+    const absolutePath = path.resolve(declared.path);
+    const key = pathKey(absolutePath, context.platform);
+    let location = locationsByKey.get(key);
+    if (!location) {
+      location = {
+        id: shortHash(key, LOCATION_ID_LENGTH),
+        path: absolutePath,
+        label: declared.label ?? labelFor(absolutePath, context),
+        scope: declared.scope,
         readers: [],
-        readOnly: !!loc.readOnly,
-        readOnlyReason: loc.readOnlyReason,
-        workspaceFolder: loc.workspaceFolder,
-        managedSubdirs: loc.managedSubdirs ? { ...loc.managedSubdirs } : undefined,
-        origin: loc.origin,
-        appliesTo: loc.appliesTo,
-        namespace: loc.namespace,
+        readOnly: !!declared.readOnly,
+        readOnlyReason: declared.readOnlyReason,
+        workspaceFolder: declared.workspaceFolder,
+        managedSubdirs: declared.managedSubdirs ? { ...declared.managedSubdirs } : undefined,
+        origin: declared.origin,
+        appliesTo: declared.appliesTo,
+        namespace: declared.namespace,
         exists: false,
         skillCount: 0,
         ignoredEntries: [],
       };
-      byKey.set(key, r);
+      locationsByKey.set(key, location);
     } else {
-      if (loc.readOnly) {
-        r.readOnly = true;
-        r.readOnlyReason = r.readOnlyReason ?? loc.readOnlyReason;
+      if (declared.readOnly) {
+        location.readOnly = true;
+        location.readOnlyReason = location.readOnlyReason ?? declared.readOnlyReason;
       }
-      if (loc.managedSubdirs) r.managedSubdirs = { ...(r.managedSubdirs ?? {}), ...loc.managedSubdirs };
+      if (declared.managedSubdirs) {
+        location.managedSubdirs = { ...(location.managedSubdirs ?? {}), ...declared.managedSubdirs };
+      }
     }
-    if (!r.readers.includes(reader)) r.readers.push(reader);
-    if (recursive && !(r.recursiveReaders ??= []).includes(reader)) r.recursiveReaders.push(reader);
+    if (!location.readers.includes(reader)) location.readers.push(reader);
+    if (readsRecursively) {
+      location.recursiveReaders ??= [];
+      if (!location.recursiveReaders.includes(reader)) location.recursiveReaders.push(reader);
+    }
   };
-  for (const a of adapters) for (const loc of a.readLocations(ctx)) add(loc, a.id, a.recursiveRoots);
-  for (const extra of opts.extraLocations ?? []) for (const reader of extra.readers) add(extra, reader);
 
-  const list = [...byKey.values()];
-  if (opts.workspaceReadOnlyReason) {
-    for (const l of list) {
-      if (l.scope === 'workspace' && !l.readOnly) {
-        l.readOnly = true;
-        l.readOnlyReason = opts.workspaceReadOnlyReason;
+  for (const adapter of adapters) {
+    for (const declared of adapter.readLocations(context)) addLocation(declared, adapter.id, adapter.recursiveRoots);
+  }
+  for (const extra of options.extraLocations ?? []) {
+    for (const reader of extra.readers) addLocation(extra, reader);
+  }
+
+  const locations = [...locationsByKey.values()];
+  if (options.workspaceReadOnlyReason) {
+    for (const location of locations) {
+      if (location.scope === 'workspace' && !location.readOnly) {
+        location.readOnly = true;
+        location.readOnlyReason = options.workspaceReadOnlyReason;
       }
     }
   }
-  const scopeOrder = { workspace: 0, global: 1, admin: 2 } as const;
-  list.sort((a, b) => scopeOrder[a.scope] - scopeOrder[b.scope] || a.path.localeCompare(b.path));
-  return list;
+  locations.sort((first, second) => SCOPE_ORDER[first.scope] - SCOPE_ORDER[second.scope] || first.path.localeCompare(second.path));
+  return locations;
 }
 
-function labelFor(abs: string, ctx: DiscoveryContext): string {
-  const folder = ctx.workspaceFolders.find((f) => abs.startsWith(f + path.sep));
-  if (folder) {
-    const rel = path.relative(folder, abs).split(path.sep).join('/');
-    return ctx.workspaceFolders.length > 1 ? `${path.basename(folder)}/${rel}` : rel;
-  }
-  return tildify(abs, ctx.homeDir).split(path.sep).join('/');
+function labelFor(absolutePath: string, context: DiscoveryContext): string {
+  const workspaceFolder = context.workspaceFolders.find((folder) => absolutePath.startsWith(folder + path.sep));
+  if (!workspaceFolder) return toPosix(tildify(absolutePath, context.homeDir));
+  const relativePath = toPosix(path.relative(workspaceFolder, absolutePath));
+  const hasSeveralFolders = context.workspaceFolders.length > 1;
+  return hasSeveralFolders ? `${path.basename(workspaceFolder)}/${relativePath}` : relativePath;
 }
 
-async function statOrNull(p: string) {
+async function statOrNull(filePath: string) {
   try {
-    return await fs.stat(p);
+    return await fs.stat(filePath);
   } catch {
     return null;
   }
@@ -120,155 +168,182 @@ async function findSkillFile(dir: string): Promise<{ file?: string; wrongCase?: 
   } catch {
     return {};
   }
-  if (names.includes('SKILL.md')) return { file: path.join(dir, 'SKILL.md') };
-  const alt = names.find((n) => n.toLowerCase() === 'skill.md');
-  return alt ? { wrongCase: alt } : {};
+  if (names.includes(SKILL_FILE_NAME)) return { file: path.join(dir, SKILL_FILE_NAME) };
+  const wrongCase = names.find((name) => name.toLowerCase() === SKILL_FILE_NAME.toLowerCase());
+  return wrongCase ? { wrongCase } : {};
+}
+
+async function readHead(file: string, maxBytes: number): Promise<{ content: string; size: number }> {
+  const { size } = await fs.stat(file);
+  const handle = await fs.open(file, 'r');
+  try {
+    const buffer = Buffer.alloc(Math.min(size, maxBytes));
+    await handle.read(buffer, 0, buffer.length, 0);
+    return { content: buffer.toString('utf8'), size };
+  } finally {
+    await handle.close();
+  }
+}
+
+function stringField(frontmatter: Record<string, unknown>, key: string): string | undefined {
+  const value = frontmatter[key];
+  return typeof value === 'string' ? value : undefined;
 }
 
 async function readSkill(
   entryPath: string,
   dirName: string,
-  loc: ResolvedLocation,
-  extra: { readOnly: boolean; readOnlyReason?: string },
-  opts: DiscoverOptions,
-): Promise<SkillRecord | 'not-a-skill'> {
+  location: ResolvedLocation,
+  readOnlyInfo: ReadOnlyInfo,
+  options: DiscoverOptions,
+): Promise<SkillRecord | NotASkill> {
   const issues: Issue[] = [];
   let isSymlink = false;
   let realDir = entryPath;
-  const lst = await fs.lstat(entryPath);
-  if (lst.isSymbolicLink()) {
+  const entryStat = await fs.lstat(entryPath);
+  if (entryStat.isSymbolicLink()) {
     isSymlink = true;
     try {
       realDir = await fs.realpath(entryPath);
     } catch {
       return {
-        ...emptyRecord(entryPath, dirName, loc, extra),
+        ...emptyRecord(entryPath, dirName, location, readOnlyInfo),
         isSymlink: true,
         issues: [{ severity: 'error', code: 'broken-symlink', message: 'Symlink target does not exist. Agents will not load this skill.' }],
         visibleTo: [],
       };
     }
   }
-  const st = await statOrNull(realDir);
-  if (!st || !st.isDirectory()) return 'not-a-skill';
+  const targetStat = await statOrNull(realDir);
+  if (!targetStat?.isDirectory()) return NOT_A_SKILL;
 
   const { file, wrongCase } = await findSkillFile(realDir);
   if (!file) {
-    if (wrongCase) {
-      return {
-        ...emptyRecord(entryPath, dirName, loc, extra),
-        isSymlink,
-        realDir,
-        skillFile: path.join(entryPath, wrongCase),
-        issues: [
-          {
-            severity: 'error',
-            code: 'skill-file-case',
-            message: `Found "${wrongCase}" but agents look for "SKILL.md" (exact case). It may load on macOS/Windows but not on Linux.`,
-          },
-        ],
-      };
-    }
-    return 'not-a-skill';
+    if (!wrongCase) return NOT_A_SKILL;
+    return {
+      ...emptyRecord(entryPath, dirName, location, readOnlyInfo),
+      isSymlink,
+      realDir,
+      skillFile: path.join(entryPath, wrongCase),
+      issues: [
+        {
+          severity: 'error',
+          code: 'skill-file-case',
+          message: `Found "${wrongCase}" but agents look for "${SKILL_FILE_NAME}" (exact case). It may load on macOS/Windows but not on Linux.`,
+        },
+      ],
+    };
   }
 
   let content = '';
   let bytes = 0;
   try {
-    const fst = await fs.stat(file);
-    bytes = fst.size;
-    if (fst.size > MAX_SKILL_MD_BYTES) {
-      issues.push({ severity: 'warning', code: 'skill-file-large', message: `SKILL.md is ${(fst.size / 1024).toFixed(0)} KB; only the first 1 MB was read.` });
+    const head = await readHead(file, MAX_SKILL_MD_BYTES);
+    content = head.content;
+    bytes = head.size;
+    if (head.size > MAX_SKILL_MD_BYTES) {
+      const sizeInKb = (head.size / 1024).toFixed(0);
+      issues.push({ severity: 'warning', code: 'skill-file-large', message: `SKILL.md is ${sizeInKb} KB; only the first 1 MB was read.` });
     }
-    const fh = await fs.open(file, 'r');
-    try {
-      const buf = Buffer.alloc(Math.min(fst.size, MAX_SKILL_MD_BYTES));
-      await fh.read(buf, 0, buf.length, 0);
-      content = buf.toString('utf8');
-    } finally {
-      await fh.close();
-    }
-  } catch (e) {
-    issues.push({ severity: 'error', code: 'skill-file-unreadable', message: `Cannot read SKILL.md: ${(e as Error).message}` });
+  } catch (error) {
+    issues.push({ severity: 'error', code: 'skill-file-unreadable', message: `Cannot read SKILL.md: ${(error as Error).message}` });
   }
 
-  const fm = parseFrontmatter(content);
+  const frontmatter = parseFrontmatter(content);
   const lineCount = content.split('\n').length;
   issues.push(
     ...validateSkill({
       dirName,
-      frontmatter: fm.data,
-      hasFrontmatter: fm.hasFrontmatter,
-      parseError: fm.error,
+      frontmatter: frontmatter.data,
+      hasFrontmatter: frontmatter.hasFrontmatter,
+      parseError: frontmatter.error,
       lineCount,
     }),
   );
 
-  const name = typeof fm.data['name'] === 'string' && fm.data['name'] ? (fm.data['name'] as string) : dirName;
-  const description = typeof fm.data['description'] === 'string' ? (fm.data['description'] as string).trim() : undefined;
-  const lockEntry = opts.lock?.get(entryPath);
+  const declaredName = stringField(frontmatter.data, 'name');
+  const lockEntry = options.lock?.get(entryPath);
 
   return {
-    id: createHash('sha1').update(pathKey(entryPath)).digest('hex').slice(0, 16),
-    name,
+    id: skillIdFor(entryPath),
+    name: declaredName || dirName,
     dirName,
-    description,
+    description: stringField(frontmatter.data, 'description')?.trim(),
     dir: entryPath,
     realDir,
     isSymlink,
-    skillFile: path.join(entryPath, 'SKILL.md'),
-    locationId: loc.id,
-    scope: loc.scope,
-    visibleTo: [...loc.readers],
-    frontmatter: fm.data,
+    skillFile: path.join(entryPath, SKILL_FILE_NAME),
+    locationId: location.id,
+    scope: location.scope,
+    visibleTo: [...location.readers],
+    frontmatter: frontmatter.data,
     issues,
-    readOnly: extra.readOnly,
-    readOnlyReason: extra.readOnlyReason,
-    namespace: loc.namespace,
+    readOnly: readOnlyInfo.readOnly,
+    readOnlyReason: readOnlyInfo.readOnlyReason,
+    namespace: location.namespace,
     source: lockEntry,
-    sourceHint: lockEntry ? undefined : findSourceHint(fm.data),
-    ghSource: lockEntry ? undefined : trackedFromGhFrontmatter(fm.data),
+    sourceHint: lockEntry ? undefined : findSourceHint(frontmatter.data),
+    ghSource: lockEntry ? undefined : trackedFromGhFrontmatter(frontmatter.data),
     skillMdBytes: bytes,
     skillMdLines: lineCount,
   };
 }
 
-function emptyRecord(
+function readSkillOrSkip(
   entryPath: string,
   dirName: string,
-  loc: ResolvedLocation,
-  extra: { readOnly: boolean; readOnlyReason?: string },
-): SkillRecord {
+  location: ResolvedLocation,
+  readOnlyInfo: ReadOnlyInfo,
+  options: DiscoverOptions,
+): Promise<SkillRecord | NotASkill> {
+  return readSkill(entryPath, dirName, location, readOnlyInfo, options).catch(() => NOT_A_SKILL);
+}
+
+function emptyRecord(entryPath: string, dirName: string, location: ResolvedLocation, readOnlyInfo: ReadOnlyInfo): SkillRecord {
   return {
-    id: createHash('sha1').update(pathKey(entryPath)).digest('hex').slice(0, 16),
+    id: skillIdFor(entryPath),
     name: dirName,
     dirName,
     dir: entryPath,
     realDir: entryPath,
     isSymlink: false,
-    skillFile: path.join(entryPath, 'SKILL.md'),
-    locationId: loc.id,
-    scope: loc.scope,
-    visibleTo: [...loc.readers],
+    skillFile: path.join(entryPath, SKILL_FILE_NAME),
+    locationId: location.id,
+    scope: location.scope,
+    visibleTo: [...location.readers],
     frontmatter: {},
     issues: [],
-    readOnly: extra.readOnly,
-    readOnlyReason: extra.readOnlyReason,
+    readOnly: readOnlyInfo.readOnly,
+    readOnlyReason: readOnlyInfo.readOnlyReason,
     skillMdBytes: 0,
     skillMdLines: 0,
   };
 }
 
 /** Other tools (e.g. `gh skill`) record provenance in frontmatter metadata. Surface it, don't trust it. */
-function findSourceHint(fm: Record<string, unknown>): string | undefined {
-  const gh = trackedFromGhFrontmatter(fm);
-  if (gh) return `gh skill — ${gh.owner}/${gh.repo}${gh.subpath ? '/' + gh.subpath : ''} @ ${gh.ref}${gh.pinned ? ' (pinned)' : ''}`;
-  const meta = fm['metadata'];
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return undefined;
-  for (const [k, v] of Object.entries(meta as Record<string, unknown>)) {
-    if (/repo|source|github|origin/i.test(k) && (typeof v === 'string' || typeof v === 'number')) return `${k}: ${v}`;
+function findSourceHint(frontmatter: Record<string, unknown>): string | undefined {
+  const ghSource = trackedFromGhFrontmatter(frontmatter);
+  if (ghSource) {
+    const subpath = ghSource.subpath ? `/${ghSource.subpath}` : '';
+    const pinned = ghSource.pinned ? ' (pinned)' : '';
+    return `gh skill — ${ghSource.owner}/${ghSource.repo}${subpath} @ ${ghSource.ref}${pinned}`;
+  }
+  const metadata = frontmatter['metadata'];
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined;
+  for (const [key, value] of Object.entries(metadata as Record<string, unknown>)) {
+    const looksLikeSource = SOURCE_METADATA_KEY.test(key);
+    const isPrintable = typeof value === 'string' || typeof value === 'number';
+    if (looksLikeSource && isPrintable) return `${key}: ${value}`;
   }
   return undefined;
+}
+
+function isFolderLike(entry: Dirent): boolean {
+  return entry.isDirectory() || entry.isSymbolicLink();
+}
+
+function sameBucket(first: string, second: string): boolean {
+  return first.toLowerCase() === second.toLowerCase();
 }
 
 /**
@@ -278,246 +353,292 @@ function findSourceHint(fm: Record<string, unknown>): string | undefined {
  */
 async function scanManaged(
   dir: string,
-  managed: string,
-  reason: string,
-  loc: ResolvedLocation,
-  opts: DiscoverOptions,
-  depth: number,
+  managedName: string,
+  readOnlyReason: string,
+  location: ResolvedLocation,
+  options: DiscoverOptions,
+  depthLeft: number,
   activeBucket?: string,
 ): Promise<SkillRecord[]> {
-  const out: SkillRecord[] = [];
-  const sub = await fs.readdir(dir, { withFileTypes: true }).catch(() => [] as Dirent[]);
-  for (const s of sub) {
-    if (s.name.startsWith('.') || (!s.isDirectory() && !s.isSymbolicLink())) continue;
-    const p = path.join(dir, s.name);
-    if (managed === 'synced' && activeBucket && s.name.toLowerCase() === activeBucket.toLowerCase()) {
-      loc.activeSyncBucket = { bucket: s.name, lastSynced: await manifestDate(p) };
+  const skills: SkillRecord[] = [];
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [] as Dirent[]);
+  const isSynced = managedName === 'synced' && !!activeBucket;
+  for (const entry of entries) {
+    if (isHidden(entry.name) || !isFolderLike(entry)) continue;
+    const entryPath = path.join(dir, entry.name);
+    if (isSynced && sameBucket(entry.name, activeBucket)) {
+      location.activeSyncBucket = { bucket: entry.name, lastSynced: await manifestDate(entryPath) };
     }
     // Claude Code syncs "your account's skills": a bucket of another account is a leftover.
-    if (managed === 'synced' && activeBucket && BUCKET_RE.test(s.name) && s.name.toLowerCase() !== activeBucket.toLowerCase()) {
-      const left = await scanManaged(p, managed, reason, loc, opts, depth - 1);
-      loc.skippedSynced = (loc.skippedSynced ?? 0) + left.length;
-      (loc.skippedSyncedBuckets ??= []).push({ bucket: s.name, path: p, skills: left.map((x) => x.name).sort(), lastSynced: await manifestDate(p) });
+    const isOtherAccountBucket = isSynced && SYNC_BUCKET_NAME.test(entry.name) && !sameBucket(entry.name, activeBucket);
+    if (isOtherAccountBucket) {
+      const leftovers = await scanManaged(entryPath, managedName, readOnlyReason, location, options, depthLeft - 1);
+      location.skippedSynced = (location.skippedSynced ?? 0) + leftovers.length;
+      location.skippedSyncedBuckets ??= [];
+      location.skippedSyncedBuckets.push({
+        bucket: entry.name,
+        path: entryPath,
+        skills: leftovers.map((skill) => skill.name).sort(),
+        lastSynced: await manifestDate(entryPath),
+      });
       continue;
     }
-    const rec = await readSkill(p, s.name, loc, { readOnly: true, readOnlyReason: reason }, opts).catch(() => 'not-a-skill' as const);
-    if (rec !== 'not-a-skill') out.push({ ...rec, managed });
-    else if (depth > 1 && s.isDirectory()) out.push(...(await scanManaged(p, managed, reason, loc, opts, depth - 1)));
+    const record = await readSkillOrSkip(entryPath, entry.name, location, { readOnly: true, readOnlyReason }, options);
+    if (record !== NOT_A_SKILL) {
+      skills.push({ ...record, managed: managedName });
+    } else if (depthLeft > 1 && entry.isDirectory()) {
+      skills.push(...(await scanManaged(entryPath, managedName, readOnlyReason, location, options, depthLeft - 1)));
+    }
   }
-  return out;
+  return skills;
 }
 
-const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-const BUCKET_RE = new RegExp(`^${UUID}_${UUID}$`, 'i');
-
-/**
- * `<organizationUuid>_<accountUuid>` of the claude.ai account Claude Code is
- * signed in with, read from ~/.claude.json (only those two fields). The synced
- * bucket names use this format (observed 2026-10-18; not documented).
- */
 /**
  * Moves the synced bucket of another claude.ai account (a leftover Claude Code
  * no longer loads) to the backup folder. Refuses the signed-in account's
  * bucket and anything that isn't `~/.claude/skills/synced/<org>_<account>`.
  */
 export async function archiveSyncedBucket(homeDir: string, bucket: string, backupRoot: string): Promise<string> {
-  if (!BUCKET_RE.test(bucket)) throw new UserError('Not a claude.ai sync folder.');
-  const active = await readClaudeSyncBucket(homeDir);
-  if (!active) throw new UserError('Can’t tell which claude.ai account is signed in, so nothing is moved.');
-  if (active === bucket.toLowerCase()) throw new UserError('That folder belongs to the signed-in claude.ai account.');
-  const dir = path.join(homeDir, '.claude', 'skills', 'synced', bucket);
-  const st = await fs.lstat(dir).catch(() => null);
-  if (!st?.isDirectory()) throw new UserError('The folder no longer exists. Refresh the list.');
+  if (!SYNC_BUCKET_NAME.test(bucket)) throw new UserError('Not a claude.ai sync folder.');
+  const activeBucket = await readClaudeSyncBucket(homeDir);
+  if (!activeBucket) throw new UserError('Can’t tell which claude.ai account is signed in, so nothing is moved.');
+  if (activeBucket === bucket.toLowerCase()) throw new UserError('That folder belongs to the signed-in claude.ai account.');
+  const bucketDir = path.join(homeDir, '.claude', 'skills', 'synced', bucket);
+  const bucketStat = await fs.lstat(bucketDir).catch(() => null);
+  if (!bucketStat?.isDirectory()) throw new UserError('The folder no longer exists. Refresh the list.');
   await fs.mkdir(backupRoot, { recursive: true });
-  const dest = path.join(backupRoot, `${timestamp()}-claude-ai-${bucket.slice(0, 8)}`);
-  await fs.rename(dir, dest).catch(async (e: NodeJS.ErrnoException) => {
-    if (e.code !== 'EXDEV') throw e;
-    await fs.cp(dir, dest, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
-    await fs.rm(dir, { recursive: true, force: true });
+  const shortBucketId = bucket.slice(0, 8);
+  const destination = path.join(backupRoot, `${timestamp()}-claude-ai-${shortBucketId}`);
+  await fs.rename(bucketDir, destination).catch(async (error: NodeJS.ErrnoException) => {
+    const isCrossDevice = error.code === 'EXDEV';
+    if (!isCrossDevice) throw error;
+    await fs.cp(bucketDir, destination, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+    await fs.rm(bucketDir, { recursive: true, force: true });
   });
-  return dest;
+  return destination;
 }
 
 /** `lastUpdated` (epoch ms) from a synced bucket's manifest.json; undefined if absent or odd. */
 async function manifestDate(bucketDir: string): Promise<string | undefined> {
   try {
-    const m = JSON.parse(await fs.readFile(path.join(bucketDir, 'manifest.json'), 'utf8')) as { lastUpdated?: unknown };
-    return typeof m.lastUpdated === 'number' && Number.isFinite(m.lastUpdated) ? new Date(m.lastUpdated).toISOString() : undefined;
+    const manifest = JSON.parse(await fs.readFile(path.join(bucketDir, 'manifest.json'), 'utf8')) as { lastUpdated?: unknown };
+    const lastUpdated = manifest.lastUpdated;
+    if (typeof lastUpdated !== 'number' || !Number.isFinite(lastUpdated)) return undefined;
+    return new Date(lastUpdated).toISOString();
   } catch {
     return undefined;
   }
 }
 
+/**
+ * `<organizationUuid>_<accountUuid>` of the claude.ai account Claude Code is
+ * signed in with, read from ~/.claude.json (only those two fields).
+ */
 export async function readClaudeSyncBucket(homeDir: string): Promise<string | undefined> {
   try {
     const raw = await fs.readFile(path.join(homeDir, '.claude.json'), 'utf8');
-    const acct = (JSON.parse(raw) as { oauthAccount?: { organizationUuid?: unknown; accountUuid?: unknown } }).oauthAccount;
-    const bucket = `${acct?.organizationUuid}_${acct?.accountUuid}`;
-    return BUCKET_RE.test(bucket) ? bucket.toLowerCase() : undefined;
+    const account = (JSON.parse(raw) as { oauthAccount?: { organizationUuid?: unknown; accountUuid?: unknown } }).oauthAccount;
+    const bucket = `${account?.organizationUuid}_${account?.accountUuid}`;
+    return SYNC_BUCKET_NAME.test(bucket) ? bucket.toLowerCase() : undefined;
   } catch {
     return undefined;
   }
 }
 
-async function scanLocation(loc: ResolvedLocation, opts: DiscoverOptions, ctx: DiscoveryContext): Promise<SkillRecord[]> {
-  const st = await statOrNull(loc.path);
-  if (!st || !st.isDirectory()) return [];
-  loc.exists = true;
+async function scanLocation(location: ResolvedLocation, options: DiscoverOptions, context: DiscoveryContext): Promise<SkillRecord[]> {
+  const locationStat = await statOrNull(location.path);
+  if (!locationStat?.isDirectory()) return [];
+  location.exists = true;
   let entries: Dirent[];
   try {
-    entries = await fs.readdir(loc.path, { withFileTypes: true });
+    entries = await fs.readdir(location.path, { withFileTypes: true });
   } catch {
     return [];
   }
-  const out: SkillRecord[] = [];
+  const locationReadOnly: ReadOnlyInfo = { readOnly: location.readOnly, readOnlyReason: location.readOnlyReason };
+  const skills: SkillRecord[] = [];
   for (const entry of entries.slice(0, MAX_ENTRIES_PER_LOCATION)) {
-    if (entry.name.startsWith('.')) continue;
-    const entryPath = path.join(loc.path, entry.name);
-    if (!entry.isDirectory() && !entry.isSymbolicLink()) {
-      if (entry.name.toLowerCase().endsWith('.md')) loc.ignoredEntries.push(entry.name);
+    if (isHidden(entry.name)) continue;
+    const entryPath = path.join(location.path, entry.name);
+    if (!isFolderLike(entry)) {
+      if (entry.name.toLowerCase().endsWith('.md')) location.ignoredEntries.push(entry.name);
       continue;
     }
-    const managedReason = loc.managedSubdirs?.[entry.name];
+    const managedReason = location.managedSubdirs?.[entry.name];
     if (managedReason) {
-      out.push(...(await scanManaged(entryPath, entry.name, managedReason, loc, opts, 2, ctx.claudeSyncBucket)));
+      skills.push(...(await scanManaged(entryPath, entry.name, managedReason, location, options, MANAGED_SCAN_DEPTH, context.claudeSyncBucket)));
       continue;
     }
-    const rec = await readSkill(entryPath, entry.name, loc, { readOnly: loc.readOnly, readOnlyReason: loc.readOnlyReason }, opts).catch(
-      () => 'not-a-skill' as const,
-    );
-    if (rec !== 'not-a-skill') {
-      out.push(rec);
+    const record = await readSkillOrSkip(entryPath, entry.name, location, locationReadOnly, options);
+    if (record !== NOT_A_SKILL) {
+      skills.push(record);
       continue;
     }
-    // A category folder (skills/<group>/<skill>/SKILL.md): only recursive readers find what's inside.
-    const grouped = loc.recursiveReaders?.length && entry.isDirectory() ? await scanGroup(entryPath, entry.name, loc, opts, 3) : [];
-    if (grouped.length) out.push(...grouped);
-    else loc.ignoredEntries.push(entry.name + '/');
+    const hasRecursiveReader = !!location.recursiveReaders?.length;
+    const skillsInCategory = hasRecursiveReader && entry.isDirectory() ? await scanCategoryFolder(entryPath, entry.name, location, options, CATEGORY_SCAN_DEPTH) : [];
+    if (skillsInCategory.length) skills.push(...skillsInCategory);
+    else location.ignoredEntries.push(entry.name + '/');
   }
-  loc.skillCount = out.length;
-  return out;
+  location.skillCount = skills.length;
+  return skills;
 }
 
-async function scanGroup(dir: string, group: string, loc: ResolvedLocation, opts: DiscoverOptions, depth: number): Promise<SkillRecord[]> {
-  const out: SkillRecord[] = [];
-  const sub = await fs.readdir(dir, { withFileTypes: true }).catch(() => [] as Dirent[]);
-  for (const s of sub) {
-    if (s.name.startsWith('.') || !s.isDirectory()) continue;
-    const p = path.join(dir, s.name);
-    const rec = await readSkill(p, s.name, loc, { readOnly: loc.readOnly, readOnlyReason: loc.readOnlyReason }, opts).catch(() => 'not-a-skill' as const);
-    if (rec !== 'not-a-skill') out.push({ ...rec, group, visibleTo: rec.visibleTo.filter((r) => loc.recursiveReaders!.includes(r)) });
-    else if (depth > 1) out.push(...(await scanGroup(p, `${group}/${s.name}`, loc, opts, depth - 1)));
+/** A category folder (skills/<group>/<skill>/SKILL.md): only recursive readers find what's inside. */
+async function scanCategoryFolder(dir: string, group: string, location: ResolvedLocation, options: DiscoverOptions, depthLeft: number): Promise<SkillRecord[]> {
+  const skills: SkillRecord[] = [];
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [] as Dirent[]);
+  const recursiveReaders = location.recursiveReaders ?? [];
+  for (const entry of entries) {
+    if (isHidden(entry.name) || !entry.isDirectory()) continue;
+    const entryPath = path.join(dir, entry.name);
+    const record = await readSkillOrSkip(entryPath, entry.name, location, { readOnly: location.readOnly, readOnlyReason: location.readOnlyReason }, options);
+    if (record !== NOT_A_SKILL) {
+      skills.push({ ...record, group, visibleTo: record.visibleTo.filter((reader) => recursiveReaders.includes(reader)) });
+    } else if (depthLeft > 1) {
+      skills.push(...(await scanCategoryFolder(entryPath, `${group}/${entry.name}`, location, options, depthLeft - 1)));
+    }
   }
-  return out;
+  return skills;
+}
+
+/** Two skills only clash when an agent invokes them by the same name: plugin and nested skills get a prefix. */
+function invocationName(skill: SkillRecord, location: ResolvedLocation | undefined, adapter: ProviderAdapter): string {
+  if (location?.namespace) return `${location.namespace}:${skill.name}`;
+  if (adapter.namespacesNested && location?.origin === 'nested') return `nested/${location.appliesTo}:${skill.name}`;
+  return skill.name;
+}
+
+function addIssueToAll(skills: SkillRecord[], issue: Issue): void {
+  for (const skill of skills) addIssueOnce(skill, issue);
 }
 
 /** Adds duplicate/shadowing issues: same skill name visible to the same provider from different real folders. */
 export function annotateConflicts(skills: SkillRecord[], adapters: ProviderAdapter[], locations: ResolvedLocation[]): ProviderSummary[] {
-  const locById = new Map(locations.map((l) => [l.id, l]));
+  const locationById = new Map(locations.map((location) => [location.id, location]));
   const summaries: ProviderSummary[] = [];
-  for (const a of adapters) {
-    const visible = skills.filter((s) => s.visibleTo.includes(a.id));
-    const byName = new Map<string, SkillRecord[]>();
-    for (const s of visible) {
-      const loc = locById.get(s.locationId);
-      const ns = loc?.namespace ? `${loc.namespace}:` : a.namespacesNested && loc?.origin === 'nested' ? `nested/${loc.appliesTo}:` : '';
-      const list = byName.get(ns + s.name) ?? [];
-      list.push(s);
-      byName.set(ns + s.name, list);
+  for (const adapter of adapters) {
+    const visibleSkills = skills.filter((skill) => skill.visibleTo.includes(adapter.id));
+    const skillsByName = new Map<string, SkillRecord[]>();
+    for (const skill of visibleSkills) {
+      const name = invocationName(skill, locationById.get(skill.locationId), adapter);
+      skillsByName.set(name, [...(skillsByName.get(name) ?? []), skill]);
     }
-    const dupes: string[] = [];
-    for (const [, list] of byName) {
-      if (list.length < 2) continue;
-      const name = list[0].name;
-      const distinctReal = new Set(list.map((s) => pathKey(s.realDir)));
-      if (distinctReal.size < 2) {
-        for (const s of list) {
-          addIssueOnce(s, {
-            severity: 'info',
-            code: 'linked-copies',
-            message: `The same skill folder is linked in ${list.length} places; ${a.displayName} sees one skill.`,
-          });
-        }
-        continue;
-      }
-      if (list.every((s) => s.managed)) {
-        // e.g. the same claude.ai skill synced for two accounts: nothing the user can fix locally.
-        for (const s of list) {
-          addIssueOnce(s, {
-            severity: 'info',
-            code: 'synced-copies',
-            message: `"${name}" is synced ${list.length} times (one copy per claude.ai account/organization).`,
-          });
-        }
-        continue;
-      }
-      const ids = new Set(list.map((s) => s.contentId));
-      if (ids.size === 1 && list[0].contentId) {
-        for (const s of list) {
-          addIssueOnce(s, {
-            severity: 'info',
-            code: 'identical-copies',
-            message: `${a.displayName} sees ${distinctReal.size} identical copies of "${name}"; whichever it picks, the content is the same.`,
-          });
-        }
-        continue;
-      }
-      dupes.push(name);
-      const where = list.map((s) => locById.get(s.locationId)?.label ?? s.dir).join(', ');
-      for (const s of list) {
-        addIssueOnce(s, {
-          severity: 'warning',
-          code: `duplicate:${a.id}`,
-          message: `${a.displayName} sees ${distinctReal.size} different skills named "${name}" (${where}). Which one wins is decided by ${a.displayName}.`,
+
+    const duplicateNames: string[] = [];
+    for (const sameName of skillsByName.values()) {
+      if (sameName.length < 2) continue;
+      const name = sameName[0].name;
+      const distinctFolders = new Set(sameName.map((skill) => pathKey(skill.realDir))).size;
+      const agent = adapter.displayName;
+
+      if (distinctFolders < 2) {
+        addIssueToAll(sameName, {
+          severity: 'info',
+          code: 'linked-copies',
+          message: `The same skill folder is linked in ${sameName.length} places; ${agent} sees one skill.`,
         });
+        continue;
       }
+      const allManagedElsewhere = sameName.every((skill) => skill.managed);
+      if (allManagedElsewhere) {
+        addIssueToAll(sameName, {
+          severity: 'info',
+          code: 'synced-copies',
+          message: `"${name}" is synced ${sameName.length} times (one copy per claude.ai account/organization).`,
+        });
+        continue;
+      }
+      const contentIds = new Set(sameName.map((skill) => skill.contentId));
+      const allIdentical = contentIds.size === 1 && !!sameName[0].contentId;
+      if (allIdentical) {
+        addIssueToAll(sameName, {
+          severity: 'info',
+          code: 'identical-copies',
+          message: `${agent} sees ${distinctFolders} identical copies of "${name}"; whichever it picks, the content is the same.`,
+        });
+        continue;
+      }
+      duplicateNames.push(name);
+      const where = sameName.map((skill) => locationById.get(skill.locationId)?.label ?? skill.dir).join(', ');
+      addIssueToAll(sameName, {
+        severity: 'warning',
+        code: `duplicate:${adapter.id}`,
+        message: `${agent} sees ${distinctFolders} different skills named "${name}" (${where}). Which one wins is decided by ${agent}.`,
+      });
     }
+
     summaries.push({
-      id: a.id,
-      displayName: a.displayName,
-      docsUrl: a.docsUrl,
-      disableHint: a.disableHint,
-      visibleSkills: new Set(visible.map((s) => s.name)).size,
-      duplicateNames: dupes,
+      id: adapter.id,
+      displayName: adapter.displayName,
+      docsUrl: adapter.docsUrl,
+      disableHint: adapter.disableHint,
+      visibleSkills: new Set(visibleSkills.map((skill) => skill.name)).size,
+      duplicateNames,
     });
   }
   return summaries;
 }
 
-function addIssueOnce(s: SkillRecord, issue: Issue) {
-  if (!s.issues.some((i) => i.code === issue.code)) s.issues.push(issue);
+function addIssueOnce(skill: SkillRecord, issue: Issue): void {
+  const alreadyThere = skill.issues.some((existing) => existing.code === issue.code);
+  if (!alreadyThere) skill.issues.push(issue);
 }
 
-export async function discover(ctx: DiscoveryContext, adapters: ProviderAdapter[], opts: DiscoverOptions = {}): Promise<DiscoveryResult> {
-  if (opts.monorepo) ctx = await expandContext(ctx, opts.monorepo);
-  if (opts.plugins) {
-    const syncBucket = ctx.claudeSyncBucket ?? (await readClaudeSyncBucket(ctx.homeDir));
-    const roots = await claudePluginSkillRoots({ homeDir: ctx.homeDir, workspaceFolders: ctx.workspaceFolders, platform: ctx.platform, pluginsRoot: opts.plugins.pluginsRoot, syncBucket }).catch(() => []);
-    ctx = { ...ctx, claudePlugins: roots, cursorPlugins: await cursorSkillRoots(ctx.homeDir).catch(() => []) };
-  }
-  const locations = resolveLocations(ctx, adapters, opts);
-  const perLocation = await Promise.all(locations.map((l) => scanLocation(l, opts, ctx)));
-  const skills = perLocation.flat();
-  // Fingerprint only skills whose name repeats: identical copies are not a real conflict.
-  const count = new Map<string, number>();
-  for (const s of skills) count.set(s.name, (count.get(s.name) ?? 0) + 1);
+/** Fingerprints only skills whose name repeats: identical copies are not a real conflict. */
+async function fingerprintRepeatedNames(skills: SkillRecord[]): Promise<void> {
+  const countByName = new Map<string, number>();
+  for (const skill of skills) countByName.set(skill.name, (countByName.get(skill.name) ?? 0) + 1);
+  const needFingerprint = skills.filter((skill) => {
+    const nameRepeats = (countByName.get(skill.name) ?? 0) > 1;
+    const isBrokenLink = skill.issues.some((issue) => issue.code === 'broken-symlink');
+    return nameRepeats && !isBrokenLink;
+  });
   await Promise.all(
-    skills
-      .filter((s) => (count.get(s.name) ?? 0) > 1 && !s.issues.some((i) => i.code === 'broken-symlink'))
-      .map(async (s) => {
-        s.contentId = await contentFingerprint(s.realDir).catch(() => undefined);
-      }),
+    needFingerprint.map(async (skill) => {
+      skill.contentId = await contentFingerprint(skill.realDir).catch(() => undefined);
+    }),
   );
-  const providers = annotateConflicts(skills, adapters, locations);
-  const nameOf = (id: string) => adapters.find((a) => a.id === id)?.displayName ?? id;
-  for (const s of skills.filter((x) => x.group)) {
-    const loc = locations.find((l) => l.id === s.locationId)!;
-    const others = loc.readers.filter((r) => !loc.recursiveReaders?.includes(r));
-    s.issues.push({
-      severity: others.length ? 'warning' : 'info',
-      code: 'in-category-folder',
-      message: `Inside the category folder "${s.group}/": only ${s.visibleTo.map(nameOf).join(', ') || 'no agent'} finds it${others.length ? `; ${others.map(nameOf).join(', ')} only read${others.length === 1 ? 's' : ''} skills directly in ${loc.label}` : ''}.`,
-    });
+}
+
+function listNames(names: string[]): string {
+  return names.join(', ');
+}
+
+/** Explains which agents find a skill that sits inside a category folder, and which don't. */
+function annotateCategoryFolders(skills: SkillRecord[], locations: ResolvedLocation[], adapters: ProviderAdapter[]): void {
+  const displayName = (id: string) => adapters.find((adapter) => adapter.id === id)?.displayName ?? id;
+  for (const skill of skills.filter((candidate) => candidate.group)) {
+    const location = locations.find((candidate) => candidate.id === skill.locationId)!;
+    const agentsThatMissIt = location.readers.filter((reader) => !location.recursiveReaders?.includes(reader));
+    const finders = listNames(skill.visibleTo.map(displayName)) || 'no agent';
+    let message = `Inside the category folder "${skill.group}/": only ${finders} finds it`;
+    if (agentsThatMissIt.length) {
+      const verb = agentsThatMissIt.length === 1 ? 'reads' : 'read';
+      message += `; ${listNames(agentsThatMissIt.map(displayName))} only ${verb} skills directly in ${location.label}`;
+    }
+    skill.issues.push({ severity: agentsThatMissIt.length ? 'warning' : 'info', code: 'in-category-folder', message: `${message}.` });
   }
-  return { scannedAt: new Date().toISOString(), context: ctx, locations, skills, providers };
+}
+
+export async function discover(context: DiscoveryContext, adapters: ProviderAdapter[], options: DiscoverOptions = {}): Promise<DiscoveryResult> {
+  if (options.monorepo) context = await expandContext(context, options.monorepo);
+  if (options.plugins) {
+    const syncBucket = context.claudeSyncBucket ?? (await readClaudeSyncBucket(context.homeDir));
+    const claudePlugins = await claudePluginSkillRoots({
+      homeDir: context.homeDir,
+      workspaceFolders: context.workspaceFolders,
+      platform: context.platform,
+      pluginsRoot: options.plugins.pluginsRoot,
+      syncBucket,
+    }).catch(() => []);
+    const cursorPlugins = await cursorSkillRoots(context.homeDir).catch(() => []);
+    context = { ...context, claudePlugins, cursorPlugins };
+  }
+  const locations = resolveLocations(context, adapters, options);
+  const skillsPerLocation = await Promise.all(locations.map((location) => scanLocation(location, options, context)));
+  const skills = skillsPerLocation.flat();
+  await fingerprintRepeatedNames(skills);
+  const providers = annotateConflicts(skills, adapters, locations);
+  annotateCategoryFolders(skills, locations, adapters);
+  return { scannedAt: new Date().toISOString(), context, locations, skills, providers };
 }

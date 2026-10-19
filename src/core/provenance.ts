@@ -6,20 +6,39 @@ import { parseGitHubUrl } from './github';
 import { validateRelativePath } from './paths';
 import type { LockEntry, TrackedSource } from './types';
 
-const SHA_RE = /^[0-9a-f]{40}$/i;
+const COMMIT_SHA = /^[0-9a-f]{40}$/i;
+const GITHUB_REPO_URL = /^https:\/\/github\.com\/[^/]+\/[^/]+?(\.git)?\/?$/;
+const BRANCH_OR_TAG_PREFIX = /^refs\/(heads|tags)\//;
+/** Characters git forbids in ref names (see `git check-ref-format`). */
+const INVALID_REF_CHARACTER = /[\s~^:?*[\\]/;
+const LEADING_OR_TRAILING_SLASHES = /^\/+|\/+$/g;
 
-export function trackedFromLock(e: LockEntry): TrackedSource {
-  const s = e.source;
+export function trackedFromLock(entry: LockEntry): TrackedSource {
+  const source = entry.source;
   return {
     origin: 'lock',
-    owner: s.owner,
-    repo: s.repo,
-    ref: s.ref,
-    subpath: s.subpath,
-    treeSha: s.treeSha,
-    commit: s.commit,
-    pinned: SHA_RE.test(s.ref),
+    owner: source.owner,
+    repo: source.repo,
+    ref: source.ref,
+    subpath: source.subpath,
+    treeSha: source.treeSha,
+    commit: source.commit,
+    pinned: COMMIT_SHA.test(source.ref),
   };
+}
+
+function isValidRef(ref: string): boolean {
+  return !!ref && !ref.includes('..') && !INVALID_REF_CHARACTER.test(ref);
+}
+
+function isValidSubpath(subpath: string): boolean {
+  if (!subpath) return true;
+  try {
+    validateRelativePath(subpath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -29,13 +48,17 @@ export function trackedFromLock(e: LockEntry): TrackedSource {
  * and `github-pinned` when installed with --pin. gh records no commit.
  * Frontmatter is untrusted: every value is validated, nothing is executed.
  */
-export function trackedFromGhFrontmatter(fm: Record<string, unknown>): TrackedSource | undefined {
-  const meta = fm['metadata'];
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return undefined;
-  const m = meta as Record<string, unknown>;
-  const str = (k: string) => (typeof m[k] === 'string' ? (m[k] as string).trim() : undefined);
-  const repoUrl = str('github-repo');
-  if (!repoUrl || !/^https:\/\/github\.com\/[^/]+\/[^/]+?(\.git)?\/?$/.test(repoUrl)) return undefined;
+export function trackedFromGhFrontmatter(frontmatter: Record<string, unknown>): TrackedSource | undefined {
+  const metadata = frontmatter['metadata'];
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined;
+  const fields = metadata as Record<string, unknown>;
+  const readString = (key: string) => {
+    const value = fields[key];
+    return typeof value === 'string' ? value.trim() : undefined;
+  };
+
+  const repoUrl = readString('github-repo');
+  if (!repoUrl || !GITHUB_REPO_URL.test(repoUrl)) return undefined;
   let owner: string;
   let repo: string;
   try {
@@ -43,27 +66,24 @@ export function trackedFromGhFrontmatter(fm: Record<string, unknown>): TrackedSo
   } catch {
     return undefined;
   }
-  const rawRef = str('github-ref');
+
+  const rawRef = readString('github-ref');
   if (!rawRef) return undefined;
-  const ref = rawRef.replace(/^refs\/(heads|tags)\//, '');
-  if (!ref || ref.includes('..') || /[\s~^:?*[\\]/.test(ref)) return undefined;
-  const subpath = (str('github-path') ?? '').replace(/^\/+|\/+$/g, '');
-  if (subpath) {
-    try {
-      validateRelativePath(subpath);
-    } catch {
-      return undefined;
-    }
-  }
-  const treeSha = str('github-tree-sha');
+  const ref = rawRef.replace(BRANCH_OR_TAG_PREFIX, '');
+  if (!isValidRef(ref)) return undefined;
+
+  const subpath = (readString('github-path') ?? '').replace(LEADING_OR_TRAILING_SLASHES, '');
+  if (!isValidSubpath(subpath)) return undefined;
+
+  const treeSha = readString('github-tree-sha');
+  const hasValidTreeSha = !!treeSha && COMMIT_SHA.test(treeSha);
   return {
     origin: 'gh-skill',
     owner,
     repo,
     ref,
     subpath,
-    treeSha: treeSha && SHA_RE.test(treeSha) ? treeSha.toLowerCase() : undefined,
-    pinned: !!str('github-pinned') || SHA_RE.test(ref),
+    treeSha: hasValidTreeSha ? treeSha.toLowerCase() : undefined,
+    pinned: !!readString('github-pinned') || COMMIT_SHA.test(ref),
   };
 }
-

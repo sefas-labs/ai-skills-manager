@@ -18,7 +18,7 @@ import type { ReadLocation } from './types';
  *    manifest's `defaultEnabled` decides (default true).
  *  - Plugin skills are namespaced (`<plugin>:<skill>`), so they never clash
  *    with your own skills of the same name.
- * Also (claudeSyncedPluginSkillRoots): plugins synced from claude.ai load as
+ * Also (syncedPluginRoots): plugins synced from claude.ai load as
  * `<name>@synced` from `plugins/synced/` (documented); inside it we assume the
  * same per-account bucket layout as synced skills (⚠️ observed, not documented).
  * Not covered: single-skill plugins that keep SKILL.md at their root.
@@ -31,110 +31,147 @@ export interface PluginRootsInput {
   pluginsRoot?: string;
 }
 
+type JsonObject = Record<string, unknown>;
+/** Value of `enabledPlugins[id]` across all settings files, highest precedence last; undefined when unset. */
+type PluginSetting = (pluginId: string) => boolean | undefined;
+
 const MANAGED_SETTINGS: Record<string, string> = {
   darwin: '/Library/Application Support/ClaudeCode/managed-settings.json',
   linux: '/etc/claude-code/managed-settings.json',
   win32: 'C:\\Program Files\\ClaudeCode\\managed-settings.json',
 };
 
-async function readJson(file: string): Promise<Record<string, unknown> | undefined> {
+const DEFAULT_SKILLS_FOLDER = './skills';
+const SYNCED_PLUGIN_SUFFIX = '@synced';
+
+async function readJson(file: string): Promise<JsonObject | undefined> {
   try {
-    const v = JSON.parse(await fs.readFile(file, 'utf8'));
-    return v && typeof v === 'object' && !Array.isArray(v) ? v : undefined;
+    const value = JSON.parse(await fs.readFile(file, 'utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
   } catch {
     return undefined;
   }
 }
 
-function enabledMap(settings: Record<string, unknown> | undefined): Record<string, boolean> {
-  const e = settings?.['enabledPlugins'];
-  if (!e || typeof e !== 'object' || Array.isArray(e)) return {};
-  return Object.fromEntries(Object.entries(e as Record<string, unknown>).filter(([, v]) => typeof v === 'boolean')) as Record<string, boolean>;
+function stringField(object: JsonObject | undefined, key: string): string | undefined {
+  const value = object?.[key];
+  return typeof value === 'string' ? value : undefined;
 }
 
-const isDir = (p: string) => fs.stat(p).then((s) => s.isDirectory(), () => false);
+function enabledPluginsOf(settings: JsonObject | undefined): Record<string, boolean> {
+  const enabledPlugins = settings?.['enabledPlugins'];
+  if (!enabledPlugins || typeof enabledPlugins !== 'object' || Array.isArray(enabledPlugins)) return {};
+  const booleanEntries = Object.entries(enabledPlugins as JsonObject).filter(([, value]) => typeof value === 'boolean');
+  return Object.fromEntries(booleanEntries) as Record<string, boolean>;
+}
+
+const isDirectory = (fullPath: string) => fs.stat(fullPath).then((stat) => stat.isDirectory(), () => false);
+const fileExists = (fullPath: string) => fs.access(fullPath).then(() => true, () => false);
+
+/** Reads `enabledPlugins` from user, project, local and managed settings (later layers win). */
+async function pluginSettingReader(input: PluginRootsInput): Promise<PluginSetting> {
+  const workspace = input.workspaceFolders[0];
+  const layersInPrecedenceOrder = [
+    enabledPluginsOf(await readJson(path.join(input.homeDir, '.claude', 'settings.json'))),
+    workspace ? enabledPluginsOf(await readJson(path.join(workspace, '.claude', 'settings.json'))) : {},
+    workspace ? enabledPluginsOf(await readJson(path.join(workspace, '.claude', 'settings.local.json'))) : {},
+    enabledPluginsOf(await readJson(MANAGED_SETTINGS[input.platform] ?? MANAGED_SETTINGS.linux)),
+  ];
+  return (pluginId) => layersInPrecedenceOrder.reduce<boolean | undefined>((value, layer) => (pluginId in layer ? layer[pluginId] : value), undefined);
+}
+
+/** Skill roots of one plugin directory: `skills/` plus the manifest's extra `skills` directories. */
+async function pluginSkillDirs(pluginDir: string, manifest: JsonObject | undefined): Promise<string[]> {
+  const extra = manifest?.['skills'];
+  const extraList = Array.isArray(extra) ? extra : typeof extra === 'string' ? [extra] : [];
+  const declared = extraList.filter((entry): entry is string => typeof entry === 'string');
+  const candidates = [DEFAULT_SKILLS_FOLDER, ...declared]
+    .map((relativeDir) => path.resolve(pluginDir, relativeDir))
+    .filter((dir) => isPathInside(dir, pluginDir, true));
+  const skillRoots: string[] = [];
+  for (const dir of new Set(candidates)) {
+    // A folder that is itself one skill is a single-skill plugin: not represented here.
+    const isSingleSkill = await fileExists(path.join(dir, 'SKILL.md'));
+    if ((await isDirectory(dir)) && !isSingleSkill) skillRoots.push(dir);
+  }
+  return skillRoots;
+}
+
+function rootLabel(pluginName: string, installPath: string, skillRoot: string): string {
+  const relativeRoot = path.relative(installPath, skillRoot).split(path.sep).join('/');
+  return relativeRoot === 'skills' ? `plugin ${pluginName}` : `plugin ${pluginName} (${relativeRoot})`;
+}
 
 export async function claudePluginSkillRoots(input: PluginRootsInput & { syncBucket?: string }): Promise<ReadLocation[]> {
-  const root = input.pluginsRoot || path.join(input.homeDir, '.claude', 'plugins');
-  const registry = await readJson(path.join(root, 'installed_plugins.json'));
+  const pluginsRoot = input.pluginsRoot || path.join(input.homeDir, '.claude', 'plugins');
+  const registry = await readJson(path.join(pluginsRoot, 'installed_plugins.json'));
   const registered = registry?.['plugins'];
-  const plugins = registered && typeof registered === 'object' ? (registered as Record<string, unknown>) : {};
+  const installsByPlugin = registered && typeof registered === 'object' ? (registered as JsonObject) : {};
+  const setting = await pluginSettingReader(input);
 
-  const ws = input.workspaceFolders[0];
-  const layers = [
-    enabledMap(await readJson(path.join(input.homeDir, '.claude', 'settings.json'))),
-    ws ? enabledMap(await readJson(path.join(ws, '.claude', 'settings.json'))) : {},
-    ws ? enabledMap(await readJson(path.join(ws, '.claude', 'settings.local.json'))) : {},
-    enabledMap(await readJson(MANAGED_SETTINGS[input.platform] ?? MANAGED_SETTINGS.linux)),
-  ];
-  const setting = (id: string) => layers.reduce<boolean | undefined>((v, l) => (id in l ? l[id] : v), undefined);
-
-  const out: ReadLocation[] = [];
-  const seen = new Set<string>();
-  for (const [id, installs] of Object.entries(plugins)) {
+  const roots: ReadLocation[] = [];
+  const seenInstallPaths = new Set<string>();
+  for (const [pluginId, installs] of Object.entries(installsByPlugin)) {
     if (!Array.isArray(installs)) continue;
-    for (const inst of installs as Array<Record<string, unknown>>) {
-      const installPath = typeof inst['installPath'] === 'string' ? (inst['installPath'] as string) : undefined;
-      if (!installPath || seen.has(installPath)) continue;
-      const scope = inst['scope'];
-      const projectPath = typeof inst['projectPath'] === 'string' ? path.resolve(inst['projectPath'] as string) : undefined;
-      const folder = projectPath ? input.workspaceFolders.find((f) => path.resolve(f) === projectPath) : undefined;
-      if (scope !== 'user' && !folder) continue; // a project/local install for another project
+    for (const install of installs as JsonObject[]) {
+      const installPath = stringField(install, 'installPath');
+      if (!installPath || seenInstallPaths.has(installPath)) continue;
+      const projectPathValue = stringField(install, 'projectPath');
+      const projectPath = projectPathValue ? path.resolve(projectPathValue) : undefined;
+      const workspaceFolder = projectPath ? input.workspaceFolders.find((folder) => path.resolve(folder) === projectPath) : undefined;
+      const isForAnotherProject = install['scope'] !== 'user' && !workspaceFolder;
+      if (isForAnotherProject) continue;
+
       const manifest = await readJson(path.join(installPath, '.claude-plugin', 'plugin.json'));
-      const name = typeof manifest?.['name'] === 'string' ? (manifest['name'] as string) : id.split('@')[0];
-      const enabled = setting(id) ?? (manifest?.['defaultEnabled'] === false ? false : true);
-      if (!enabled) continue;
-      seen.add(installPath);
-      const extra = manifest?.['skills'];
-      const declared = (Array.isArray(extra) ? extra : typeof extra === 'string' ? [extra] : []).filter((x): x is string => typeof x === 'string');
-      const dirs = ['./skills', ...declared].map((rel) => path.resolve(installPath, rel)).filter((d) => isPathInside(d, installPath, true));
-      for (const dir of [...new Set(dirs)]) {
-        if (!(await isDir(dir))) continue;
-        // A folder that is itself one skill is a single-skill plugin: not represented here.
-        if (await fs.access(path.join(dir, 'SKILL.md')).then(() => true, () => false)) continue;
-        out.push({
-          path: dir,
-          scope: folder ? 'workspace' : 'global',
-          workspaceFolder: folder,
+      const pluginName = stringField(manifest, 'name') ?? pluginId.split('@')[0];
+      const enabledByDefault = manifest?.['defaultEnabled'] !== false;
+      if (!(setting(pluginId) ?? enabledByDefault)) continue;
+      seenInstallPaths.add(installPath);
+
+      for (const skillRoot of await pluginSkillDirs(installPath, manifest)) {
+        roots.push({
+          path: skillRoot,
+          scope: workspaceFolder ? 'workspace' : 'global',
+          workspaceFolder,
           origin: 'plugin',
-          namespace: name,
-          label: `plugin ${name}${path.relative(installPath, dir) === 'skills' ? '' : ` (${path.relative(installPath, dir).split(path.sep).join('/')})`}`,
+          namespace: pluginName,
+          label: rootLabel(pluginName, installPath, skillRoot),
           readOnly: true,
-          readOnlyReason: `Installed by the Claude Code plugin "${id}" — manage it with /plugin in Claude Code.`,
+          readOnlyReason: `Installed by the Claude Code plugin "${pluginId}" — manage it with /plugin in Claude Code.`,
         });
       }
     }
   }
-  out.push(...(await syncedPluginRoots(root, input.syncBucket, setting)));
-  return out;
-}
-
-/** Skill roots of one plugin directory: `skills/` plus the manifest's extra `skills` directories. */
-async function pluginSkillDirs(pluginDir: string, manifest: Record<string, unknown> | undefined): Promise<string[]> {
-  const extra = manifest?.['skills'];
-  const declared = (Array.isArray(extra) ? extra : typeof extra === 'string' ? [extra] : []).filter((x): x is string => typeof x === 'string');
-  const dirs = [...new Set(['./skills', ...declared].map((rel) => path.resolve(pluginDir, rel)).filter((d) => isPathInside(d, pluginDir, true)))];
-  const ok: string[] = [];
-  for (const d of dirs) if ((await isDir(d)) && !(await fs.access(path.join(d, 'SKILL.md')).then(() => true, () => false))) ok.push(d);
-  return ok;
+  roots.push(...(await syncedPluginRoots(pluginsRoot, input.syncBucket, setting)));
+  return roots;
 }
 
 /** claude.ai plugins: `<plugins root>/synced/<org>_<account>/<plugin>/` of the signed-in account (⚠️ layout observed). */
-async function syncedPluginRoots(root: string, bucket: string | undefined, setting: (id: string) => boolean | undefined): Promise<ReadLocation[]> {
+async function syncedPluginRoots(pluginsRoot: string, bucket: string | undefined, setting: PluginSetting): Promise<ReadLocation[]> {
   if (!bucket) return [];
-  const base = path.join(root, 'synced', bucket);
-  const out: ReadLocation[] = [];
-  for (const e of await fs.readdir(base, { withFileTypes: true }).catch(() => [])) {
-    if (!e.isDirectory() || e.name.startsWith('.')) continue;
-    const dir = path.join(base, e.name);
-    const manifest = await readJson(path.join(dir, '.claude-plugin', 'plugin.json'));
-    const name = typeof manifest?.['name'] === 'string' ? (manifest['name'] as string) : e.name;
-    if (setting(`${name}@synced`) === false || (setting(`${name}@synced`) === undefined && manifest?.['defaultEnabled'] === false)) continue;
-    for (const d of await pluginSkillDirs(dir, manifest)) {
-      out.push({ path: d, scope: 'global', origin: 'plugin', namespace: name, label: `claude.ai plugin ${name}`, readOnly: true, readOnlyReason: 'Synced from claude.ai — manage it on claude.ai or with /plugin.' });
+  const bucketDir = path.join(pluginsRoot, 'synced', bucket);
+  const roots: ReadLocation[] = [];
+  for (const entry of await fs.readdir(bucketDir, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    const pluginDir = path.join(bucketDir, entry.name);
+    const manifest = await readJson(path.join(pluginDir, '.claude-plugin', 'plugin.json'));
+    const pluginName = stringField(manifest, 'name') ?? entry.name;
+    const explicitSetting = setting(pluginName + SYNCED_PLUGIN_SUFFIX);
+    const enabledByDefault = manifest?.['defaultEnabled'] !== false;
+    if (!(explicitSetting ?? enabledByDefault)) continue;
+    for (const skillRoot of await pluginSkillDirs(pluginDir, manifest)) {
+      roots.push({
+        path: skillRoot,
+        scope: 'global',
+        origin: 'plugin',
+        namespace: pluginName,
+        label: `claude.ai plugin ${pluginName}`,
+        readOnly: true,
+        readOnlyReason: 'Synced from claude.ai — manage it on claude.ai or with /plugin.',
+      });
     }
   }
-  return out;
+  return roots;
 }
 
 /**
@@ -144,18 +181,27 @@ async function syncedPluginRoots(root: string, bucket: string | undefined, setti
  * "built-in skills" the docs list; the folder itself isn't documented).
  */
 export async function cursorSkillRoots(homeDir: string): Promise<ReadLocation[]> {
-  const out: ReadLocation[] = [];
-  const builtIn = path.join(homeDir, '.cursor', 'skills-cursor');
-  if (await isDir(builtIn)) out.push({ path: builtIn, scope: 'global', label: 'Cursor built-in skills', readOnly: true, readOnlyReason: 'Built into Cursor — Cursor manages these.' });
-  const local = path.join(homeDir, '.cursor', 'plugins', 'local');
-  for (const e of await fs.readdir(local, { withFileTypes: true }).catch(() => [])) {
-    if (!e.isDirectory() || e.name.startsWith('.')) continue;
-    const dir = path.join(local, e.name);
-    const manifest = (await readJson(path.join(dir, '.cursor-plugin', 'plugin.json'))) ?? (await readJson(path.join(dir, '.claude-plugin', 'plugin.json')));
-    const name = typeof manifest?.['name'] === 'string' ? (manifest['name'] as string) : e.name;
-    for (const d of await pluginSkillDirs(dir, manifest)) {
-      out.push({ path: d, scope: 'global', origin: 'plugin', label: `Cursor plugin ${name} (local)`, readOnly: true, readOnlyReason: `Part of your local Cursor plugin "${name}" — edit it in ~/.cursor/plugins/local.` });
+  const roots: ReadLocation[] = [];
+  const builtInDir = path.join(homeDir, '.cursor', 'skills-cursor');
+  if (await isDirectory(builtInDir)) {
+    roots.push({ path: builtInDir, scope: 'global', label: 'Cursor built-in skills', readOnly: true, readOnlyReason: 'Built into Cursor — Cursor manages these.' });
+  }
+  const localPluginsDir = path.join(homeDir, '.cursor', 'plugins', 'local');
+  for (const entry of await fs.readdir(localPluginsDir, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    const pluginDir = path.join(localPluginsDir, entry.name);
+    const manifest = (await readJson(path.join(pluginDir, '.cursor-plugin', 'plugin.json'))) ?? (await readJson(path.join(pluginDir, '.claude-plugin', 'plugin.json')));
+    const pluginName = stringField(manifest, 'name') ?? entry.name;
+    for (const skillRoot of await pluginSkillDirs(pluginDir, manifest)) {
+      roots.push({
+        path: skillRoot,
+        scope: 'global',
+        origin: 'plugin',
+        label: `Cursor plugin ${pluginName} (local)`,
+        readOnly: true,
+        readOnlyReason: `Part of your local Cursor plugin "${pluginName}" — edit it in ~/.cursor/plugins/local.`,
+      });
     }
   }
-  return out;
+  return roots;
 }

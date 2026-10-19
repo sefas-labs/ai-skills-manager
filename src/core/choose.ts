@@ -29,30 +29,6 @@ export interface ChoosePlan {
   loseIfRemoved: ProviderId[];
 }
 
-export function planChoose(chosen: SkillRecord, skills: SkillRecord[], locations: ResolvedLocation[]): ChoosePlan {
-  const locById = new Map(locations.map((l) => [l.id, l]));
-  const chosenLocation = locById.get(chosen.locationId)!;
-  const others: OtherCopy[] = [];
-  for (const s of skills) {
-    // Namespaced (plugin) skills are different skills even with the same name.
-    if (s.id === chosen.id || s.name !== chosen.name || s.namespace !== chosen.namespace || pathKey(s.realDir) === pathKey(chosen.realDir)) continue;
-    const location = locById.get(s.locationId);
-    if (!location || s.issues.some((i) => i.code === 'broken-symlink')) continue;
-    const readOnly = s.readOnly || location.readOnly || !!s.managed;
-    const blocked = readOnly
-      ? (s.readOnlyReason ?? location.readOnlyReason ?? 'read-only')
-      : s.isSymlink
-        ? 'it is a link to another folder'
-        : s.dirName !== chosen.dirName
-          ? `its folder is named "${s.dirName}"`
-          : undefined;
-    others.push({ skill: s, location, identical: !!s.contentId && s.contentId === chosen.contentId, writable: !readOnly, blocked });
-  }
-  const kept = new Set([...chosen.visibleTo, ...others.filter((o) => !o.writable).flatMap((o) => o.skill.visibleTo)]);
-  const loseIfRemoved = [...new Set(others.filter((o) => o.writable).flatMap((o) => o.skill.visibleTo))].filter((p) => !kept.has(p)).sort();
-  return { chosen, chosenLocation, others, loseIfRemoved };
-}
-
 export interface ChooseDeps {
   lock: LockStore;
   backupRoot: string;
@@ -60,25 +36,66 @@ export interface ChooseDeps {
   skills: SkillRecord[];
 }
 
+/** Plugin skills are namespaced, so the same name in another namespace is a different skill. */
+function isAnotherCopyOf(candidate: SkillRecord, chosen: SkillRecord): boolean {
+  if (candidate.id === chosen.id) return false;
+  if (candidate.name !== chosen.name || candidate.namespace !== chosen.namespace) return false;
+  return pathKey(candidate.realDir) !== pathKey(chosen.realDir);
+}
+
+function whyBlocked(copy: SkillRecord, location: ResolvedLocation, chosen: SkillRecord, readOnly: boolean): string | undefined {
+  if (readOnly) return copy.readOnlyReason ?? location.readOnlyReason ?? 'read-only';
+  if (copy.isSymlink) return 'it is a link to another folder';
+  if (copy.dirName !== chosen.dirName) return `its folder is named "${copy.dirName}"`;
+  return undefined;
+}
+
+export function planChoose(chosen: SkillRecord, skills: SkillRecord[], locations: ResolvedLocation[]): ChoosePlan {
+  const locationById = new Map(locations.map((location) => [location.id, location]));
+  const chosenLocation = locationById.get(chosen.locationId)!;
+  const others: OtherCopy[] = [];
+  for (const candidate of skills) {
+    if (!isAnotherCopyOf(candidate, chosen)) continue;
+    const location = locationById.get(candidate.locationId);
+    const isBrokenLink = candidate.issues.some((issue) => issue.code === 'broken-symlink');
+    if (!location || isBrokenLink) continue;
+    const readOnly = candidate.readOnly || location.readOnly || !!candidate.managed;
+    others.push({
+      skill: candidate,
+      location,
+      identical: !!candidate.contentId && candidate.contentId === chosen.contentId,
+      writable: !readOnly,
+      blocked: whyBlocked(candidate, location, chosen, readOnly),
+    });
+  }
+
+  const readOnlyOthers = others.filter((other) => !other.writable);
+  const writableOthers = others.filter((other) => other.writable);
+  const agentsStillServed = new Set([...chosen.visibleTo, ...readOnlyOthers.flatMap((other) => other.skill.visibleTo)]);
+  const agentsOfWritable = new Set(writableOthers.flatMap((other) => other.skill.visibleTo));
+  const loseIfRemoved = [...agentsOfWritable].filter((agent) => !agentsStillServed.has(agent)).sort();
+  return { chosen, chosenLocation, others, loseIfRemoved };
+}
+
 /** Overwrite every differing, overwritable copy with the chosen version (each replaced copy goes to the backup folder). */
 export async function syncToChosen(plan: ChoosePlan, deps: ChooseDeps): Promise<string[]> {
-  const done: string[] = [];
-  for (const o of plan.others) {
-    if (o.identical || o.blocked) continue;
-    const t = await planTransfer(plan.chosen, plan.chosenLocation, o.location, 'copy', deps.skills);
-    await executeTransfer(t, true, deps);
-    done.push(o.skill.dir);
+  const replacedDirs: string[] = [];
+  for (const other of plan.others) {
+    if (other.identical || other.blocked) continue;
+    const transfer = await planTransfer(plan.chosen, plan.chosenLocation, other.location, 'copy', deps.skills);
+    await executeTransfer(transfer, true, deps);
+    replacedDirs.push(other.skill.dir);
   }
-  return done;
+  return replacedDirs;
 }
 
 /** Move every writable other copy to the backup folder, leaving the chosen one as the only editable copy. */
 export async function removeOthers(plan: ChoosePlan, deps: ChooseDeps): Promise<string[]> {
-  const done: string[] = [];
-  for (const o of plan.others) {
-    if (!o.writable) continue;
-    await uninstallSkill(o.skill, o.location, { lock: deps.lock, trashRoot: deps.backupRoot });
-    done.push(o.skill.dir);
+  const removedDirs: string[] = [];
+  for (const other of plan.others) {
+    if (!other.writable) continue;
+    await uninstallSkill(other.skill, other.location, { lock: deps.lock, trashRoot: deps.backupRoot });
+    removedDirs.push(other.skill.dir);
   }
-  return done;
+  return removedDirs;
 }

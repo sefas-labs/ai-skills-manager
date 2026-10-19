@@ -11,7 +11,14 @@ import type { DiscoveryContext } from './types';
 /** Folder names whose `skills/` sub-folder some agent reads when nested. */
 export const NESTED_SKILL_PARENTS = ['.claude', '.agents', '.cursor'];
 
-const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'out', 'target', 'vendor', 'venv', '__pycache__', 'coverage']);
+/** Dependency and build output folders: never worth walking into. */
+export const SKIPPED_FOLDERS = new Set(['node_modules', 'dist', 'build', 'out', 'target', 'vendor', 'venv', '__pycache__', 'coverage']);
+
+const DEFAULT_MAX_DEPTH = 6;
+const DEFAULT_MAX_FOLDERS = 5000;
+
+const pathExists = (fullPath: string) => fs.lstat(fullPath).then(() => true, () => false);
+const isDirectory = (fullPath: string) => fs.lstat(fullPath).then((stat) => stat.isDirectory(), () => false);
 
 /**
  * Nearest folder at or above `start` that contains `.git` (a directory, or a
@@ -21,25 +28,31 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'out', 'target', 've
 export async function findRepoRoot(start: string, stopAt?: string): Promise<string | undefined> {
   let dir = path.resolve(start);
   for (;;) {
-    if (await fs.lstat(path.join(dir, '.git')).then(() => true, () => false)) return dir;
+    if (await pathExists(path.join(dir, '.git'))) return dir;
     const parent = path.dirname(dir);
-    if (parent === dir || (stopAt && dir === path.resolve(stopAt))) return undefined;
+    const reachedFilesystemRoot = parent === dir;
+    const reachedStop = !!stopAt && dir === path.resolve(stopAt);
+    if (reachedFilesystemRoot || reachedStop) return undefined;
     dir = parent;
   }
 }
 
-/** Folders strictly above `from` up to and including `root`. */
+/** Folders strictly above `from` up to and including `root`; empty when `root` is not an ancestor. */
 export function ancestorsUpTo(from: string, root: string): string[] {
-  const out: string[] = [];
+  const ancestors: string[] = [];
   let dir = path.resolve(from);
   const top = path.resolve(root);
   while (dir !== top) {
     const parent = path.dirname(dir);
-    if (parent === dir) return []; // `root` is not an ancestor
-    out.push(parent);
+    if (parent === dir) return [];
+    ancestors.push(parent);
     dir = parent;
   }
-  return out;
+  return ancestors;
+}
+
+export function shouldWalkInto(entry: { name: string; isDirectory(): boolean }): boolean {
+  return entry.isDirectory() && !entry.name.startsWith('.') && !SKIPPED_FOLDERS.has(entry.name);
 }
 
 /**
@@ -47,46 +60,51 @@ export function ancestorsUpTo(from: string, root: string): string[] {
  * `.claude/skills`, `.agents/skills` or `.cursor/skills` directory. Bounded:
  * skips hidden and build/dependency folders, never follows symlinks.
  */
-export async function findNestedSkillDirs(root: string, opts: { maxDepth?: number; maxDirs?: number } = {}): Promise<string[]> {
-  const maxDepth = opts.maxDepth ?? 6;
-  let budget = opts.maxDirs ?? 5000;
+export async function findNestedSkillDirs(root: string, limits: { maxDepth?: number; maxDirs?: number } = {}): Promise<string[]> {
+  const maxDepth = limits.maxDepth ?? DEFAULT_MAX_DEPTH;
+  let foldersLeft = limits.maxDirs ?? DEFAULT_MAX_FOLDERS;
   const found: string[] = [];
-  const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
-    if (depth > maxDepth || budget-- <= 0) return;
+
+  const hasNestedSkillsFolder = async (dir: string, entryNames: Set<string>) => {
+    for (const parentName of NESTED_SKILL_PARENTS) {
+      if (entryNames.has(parentName) && (await isDirectory(path.join(dir, parentName, 'skills')))) return true;
+    }
+    return false;
+  };
+
+  const walk = async (dir: string, relativeDir: string, depth: number): Promise<void> => {
+    if (depth > maxDepth || foldersLeft-- <= 0) return;
     let entries;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch {
       return;
     }
-    if (rel) {
-      for (const name of NESTED_SKILL_PARENTS) {
-        const e = entries.find((x) => x.name === name && x.isDirectory());
-        if (e && (await fs.lstat(path.join(dir, name, 'skills')).then((s) => s.isDirectory(), () => false))) {
-          found.push(rel);
-          break;
-        }
-      }
-    }
-    for (const e of entries) {
-      if (!e.isDirectory() || e.name.startsWith('.') || SKIP_DIRS.has(e.name)) continue;
-      await walk(path.join(dir, e.name), rel ? `${rel}/${e.name}` : e.name, depth + 1);
+    const isWorkspaceRoot = relativeDir === '';
+    const directoryNames = new Set(entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name));
+    if (!isWorkspaceRoot && (await hasNestedSkillsFolder(dir, directoryNames))) found.push(relativeDir);
+    for (const entry of entries) {
+      if (!shouldWalkInto(entry)) continue;
+      const childRelative = isWorkspaceRoot ? entry.name : `${relativeDir}/${entry.name}`;
+      await walk(path.join(dir, entry.name), childRelative, depth + 1);
     }
   };
+
   await walk(root, '', 0);
   return found.sort();
 }
 
 /** Fills `repoRoots` and `nestedDirs` for every workspace folder. */
-export async function expandContext(ctx: DiscoveryContext, opts: { parents: boolean; nested: boolean }): Promise<DiscoveryContext> {
+export async function expandContext(context: DiscoveryContext, include: { parents: boolean; nested: boolean }): Promise<DiscoveryContext> {
   const repoRoots: Record<string, string> = {};
   const nestedDirs: Record<string, string[]> = {};
-  for (const folder of ctx.workspaceFolders) {
-    if (opts.parents) {
-      const root = await findRepoRoot(folder);
-      if (root && path.resolve(root) !== path.resolve(folder)) repoRoots[folder] = root;
+  for (const folder of context.workspaceFolders) {
+    if (include.parents) {
+      const repoRoot = await findRepoRoot(folder);
+      const isAboveFolder = !!repoRoot && path.resolve(repoRoot) !== path.resolve(folder);
+      if (isAboveFolder) repoRoots[folder] = repoRoot;
     }
-    if (opts.nested) nestedDirs[folder] = await findNestedSkillDirs(folder);
+    if (include.nested) nestedDirs[folder] = await findNestedSkillDirs(folder);
   }
-  return { ...ctx, repoRoots, nestedDirs };
+  return { ...context, repoRoots, nestedDirs };
 }

@@ -1,10 +1,9 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { setFrontmatterKey } from './fixes';
 import { parseFrontmatter } from './frontmatter';
-import { timestamp } from './installer';
 import { pathKey } from './paths';
+import { replaceWithBackup } from './safeWrite';
 import { UserError, type SkillRecord } from './types';
 
 /**
@@ -24,6 +23,23 @@ import { UserError, type SkillRecord } from './types';
 export type ClaudeOverride = 'on' | 'name-only' | 'user-invocable-only' | 'off';
 export const CLAUDE_OVERRIDES: ClaudeOverride[] = ['on', 'name-only', 'user-invocable-only', 'off'];
 
+type ClaudeSettingsLayer = 'user' | 'project' | 'local';
+
+const SKILL_OVERRIDES_KEY = 'skillOverrides';
+const DISABLE_MODEL_INVOCATION_KEY = 'disable-model-invocation';
+const USER_INVOCABLE_KEY = 'user-invocable';
+/** Values the agents assume when a frontmatter key is absent. */
+const FRONTMATTER_DEFAULTS: Record<string, boolean> = { [DISABLE_MODEL_INVOCATION_KEY]: false, [USER_INVOCABLE_KEY]: true };
+
+const CODEX_SKILL_TABLE_HEADER = /^\s*\[\[\s*skills\.config\s*\]\]\s*(#.*)?$/;
+const ANY_TABLE_HEADER = /^\s*\[/;
+const CODEX_SKILL_KEY_LINE = /^\s*(path|enabled)\s*=\s*(.+)$/;
+const BOOLEAN_VALUE = /^(true|false)\b/;
+const BOOLEAN_ASSIGNMENT = /(=\s*)(true|false)/;
+const TRAILING_COMMENT = /\s+#.*$/;
+const SINGLE_QUOTED_STRING = /^'([^']*)'/;
+const TRAILING_WHITESPACE = /\s*$/;
+
 export interface ToggleFiles {
   claudeUser: string;
   claudeProject?: string;
@@ -41,11 +57,19 @@ export function toggleFiles(homeDir: string, workspaceFolder?: string): ToggleFi
 }
 
 export interface SkillToggleState {
-  claude?: { value: ClaudeOverride; from?: 'user' | 'project' | 'local' };
+  claude?: { value: ClaudeOverride; from?: ClaudeSettingsLayer };
   codex?: { enabled: boolean };
   /** Frontmatter flags (Cursor, Copilot and Claude Code honour them). */
   modelInvocation: boolean;
   userInvocable: boolean;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function lineEndingOf(text: string): string {
+  return text.includes('\r\n') ? '\r\n' : '\n';
 }
 
 // ---------- Claude settings (JSON) ----------
@@ -58,18 +82,23 @@ async function readJsonFile(file?: string): Promise<Record<string, unknown> | un
   } catch {
     return undefined;
   }
+  let parsed: unknown;
   try {
-    const v = JSON.parse(raw);
-    if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('not an object');
-    return v as Record<string, unknown>;
+    parsed = JSON.parse(raw);
   } catch {
-    throw new UserError(`${file} is not valid JSON; edit it by hand.`, 'toggle');
+    parsed = undefined;
   }
+  if (!isPlainObject(parsed)) throw new UserError(`${file} is not valid JSON; edit it by hand.`, 'toggle');
+  return parsed;
 }
 
 function overridesOf(settings?: Record<string, unknown>): Record<string, string> {
-  const o = settings?.['skillOverrides'];
-  return o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, string>) : {};
+  const overrides = settings?.[SKILL_OVERRIDES_KEY];
+  return isPlainObject(overrides) ? (overrides as Record<string, string>) : {};
+}
+
+function isClaudeOverride(value: unknown): value is ClaudeOverride {
+  return typeof value === 'string' && (CLAUDE_OVERRIDES as string[]).includes(value);
 }
 
 // ---------- Codex config (TOML, only [[skills.config]]) ----------
@@ -84,134 +113,126 @@ export interface CodexSkillEntry {
   pathLine: number;
 }
 
-function tomlString(v: string): string | undefined {
-  const t = v.trim();
-  if (t.startsWith('"')) {
+/** Value of a TOML basic ("…") or literal ('…') string, or undefined. */
+function readTomlString(rawValue: string): string | undefined {
+  const value = rawValue.trim();
+  if (value.startsWith('"')) {
     try {
-      return JSON.parse(t.replace(/\s+#.*$/, ''));
+      return JSON.parse(value.replace(TRAILING_COMMENT, ''));
     } catch {
       return undefined;
     }
   }
-  if (t.startsWith("'")) {
-    const m = /^'([^']*)'/.exec(t);
-    return m ? m[1] : undefined;
-  }
+  if (value.startsWith("'")) return SINGLE_QUOTED_STRING.exec(value)?.[1];
   return undefined;
 }
 
 /** Reads only `[[skills.config]]` tables; everything else in the file is left alone. */
 export function parseCodexSkillConfig(toml: string): CodexSkillEntry[] {
   const lines = toml.split(/\r?\n/);
-  const out: CodexSkillEntry[] = [];
-  let cur: Partial<CodexSkillEntry> & { start: number } | undefined;
-  const close = (end: number) => {
-    if (cur && typeof cur.path === 'string' && cur.pathLine !== undefined) out.push({ enabled: true, ...cur, end } as CodexSkillEntry);
-    cur = undefined;
+  const entries: CodexSkillEntry[] = [];
+  let current: (Partial<CodexSkillEntry> & { start: number }) | undefined;
+
+  const closeCurrentTable = (lastLine: number) => {
+    const isComplete = current && typeof current.path === 'string' && current.pathLine !== undefined;
+    if (isComplete) entries.push({ enabled: true, ...current, end: lastLine } as CodexSkillEntry);
+    current = undefined;
   };
-  lines.forEach((line, i) => {
-    if (/^\s*\[\[\s*skills\.config\s*\]\]\s*(#.*)?$/.test(line)) {
-      close(i - 1);
-      cur = { start: i };
+
+  lines.forEach((line, lineIndex) => {
+    if (CODEX_SKILL_TABLE_HEADER.test(line)) {
+      closeCurrentTable(lineIndex - 1);
+      current = { start: lineIndex };
       return;
     }
-    if (/^\s*\[/.test(line)) {
-      close(i - 1);
+    if (ANY_TABLE_HEADER.test(line)) {
+      closeCurrentTable(lineIndex - 1);
       return;
     }
-    if (!cur) return;
-    const kv = /^\s*(path|enabled)\s*=\s*(.+)$/.exec(line);
-    if (!kv) return;
-    if (kv[1] === 'path') {
-      const p = tomlString(kv[2]);
-      if (p !== undefined) {
-        cur.path = p;
-        cur.pathLine = i;
+    if (!current) return;
+    const keyLine = CODEX_SKILL_KEY_LINE.exec(line);
+    if (!keyLine) return;
+    const [, key, rawValue] = keyLine;
+    if (key === 'path') {
+      const skillPath = readTomlString(rawValue);
+      if (skillPath !== undefined) {
+        current.path = skillPath;
+        current.pathLine = lineIndex;
       }
     } else {
-      const b = /^(true|false)\b/.exec(kv[2].trim());
-      if (b) {
-        cur.enabled = b[1] === 'true';
-        cur.enabledLine = i;
+      const booleanValue = BOOLEAN_VALUE.exec(rawValue.trim());
+      if (booleanValue) {
+        current.enabled = booleanValue[1] === 'true';
+        current.enabledLine = lineIndex;
       }
     }
   });
-  close(lines.length - 1);
+  closeCurrentTable(lines.length - 1);
+
   // Trailing blank lines don't belong to the last table.
-  for (const e of out) while (e.end > e.start && !lines[e.end].trim()) e.end--;
-  return out;
+  for (const entry of entries) {
+    while (entry.end > entry.start && !lines[entry.end].trim()) entry.end--;
+  }
+  return entries;
 }
 
 /** Sets `enabled` for a SKILL.md path with a minimal edit (or appends a new table). */
 export function setCodexSkillEnabled(toml: string, skillMd: string, enabled: boolean, platform: NodeJS.Platform = process.platform): string {
-  const eol = toml.includes('\r\n') ? '\r\n' : '\n';
+  const lineEnding = lineEndingOf(toml);
   const lines = toml.length ? toml.split(/\r?\n/) : [];
-  const hit = parseCodexSkillConfig(toml).find((e) => pathKey(e.path, platform) === pathKey(skillMd, platform));
-  if (hit) {
-    if (hit.enabledLine !== undefined) lines[hit.enabledLine] = lines[hit.enabledLine].replace(/(=\s*)(true|false)/, `$1${enabled}`);
-    else lines.splice(hit.pathLine + 1, 0, `enabled = ${enabled}`);
-    return lines.join(eol);
+  const existing = parseCodexSkillConfig(toml).find((entry) => pathKey(entry.path, platform) === pathKey(skillMd, platform));
+  if (existing) {
+    if (existing.enabledLine !== undefined) {
+      lines[existing.enabledLine] = lines[existing.enabledLine].replace(BOOLEAN_ASSIGNMENT, `$1${enabled}`);
+    } else {
+      lines.splice(existing.pathLine + 1, 0, `enabled = ${enabled}`);
+    }
+    return lines.join(lineEnding);
   }
-  if (enabled) return toml; // absent = enabled
-  const block = ['[[skills.config]]', `path = ${JSON.stringify(skillMd)}`, 'enabled = false'];
-  const body = lines.join(eol).replace(/\s*$/, '');
-  return (body ? body + eol + eol : '') + block.join(eol) + eol;
+  const absentMeansEnabled = enabled;
+  if (absentMeansEnabled) return toml;
+  const newTable = ['[[skills.config]]', `path = ${JSON.stringify(skillMd)}`, 'enabled = false'];
+  const body = lines.join(lineEnding).replace(TRAILING_WHITESPACE, '');
+  const separator = body ? lineEnding + lineEnding : '';
+  return body + separator + newTable.join(lineEnding) + lineEnding;
 }
 
 // ---------- read state ----------
 
-export async function readToggleState(skill: SkillRecord, files: ToggleFiles): Promise<SkillToggleState> {
-  const layers: Array<['user' | 'project' | 'local', string | undefined]> = [
+async function readClaudeOverride(skill: SkillRecord, files: ToggleFiles): Promise<SkillToggleState['claude']> {
+  // Plugin skills are not affected by skillOverrides.
+  if (skill.namespace) return undefined;
+  const layersInPrecedenceOrder: Array<[ClaudeSettingsLayer, string | undefined]> = [
     ['user', files.claudeUser],
     ['project', files.claudeProject],
     ['local', files.claudeLocal],
   ];
-  let claude: SkillToggleState['claude'];
-  if (!skill.namespace) {
-    claude = { value: 'on' };
-    for (const [from, file] of layers) {
-      const v = overridesOf(await readJsonFile(file).catch(() => undefined))[skill.name];
-      if (typeof v === 'string' && (CLAUDE_OVERRIDES as string[]).includes(v)) claude = { value: v as ClaudeOverride, from };
-    }
+  let state: SkillToggleState['claude'] = { value: 'on' };
+  for (const [layer, file] of layersInPrecedenceOrder) {
+    const settings = await readJsonFile(file).catch(() => undefined);
+    const value = overridesOf(settings)[skill.name];
+    if (isClaudeOverride(value)) state = { value, from: layer };
   }
-  let codex: SkillToggleState['codex'] = { enabled: true };
-  try {
-    const entry = parseCodexSkillConfig(await fs.readFile(files.codexConfig, 'utf8')).find((e) => pathKey(e.path) === pathKey(skill.skillFile));
-    if (entry) codex = { enabled: entry.enabled };
-  } catch {
-    /* no config */
-  }
-  const fm = skill.frontmatter;
+  return state;
+}
+
+async function readCodexEnabled(skill: SkillRecord, files: ToggleFiles): Promise<SkillToggleState['codex']> {
+  const toml = await fs.readFile(files.codexConfig, 'utf8').catch(() => undefined);
+  if (toml === undefined) return { enabled: true };
+  const entry = parseCodexSkillConfig(toml).find((candidate) => pathKey(candidate.path) === pathKey(skill.skillFile));
+  return { enabled: entry ? entry.enabled : true };
+}
+
+export async function readToggleState(skill: SkillRecord, files: ToggleFiles): Promise<SkillToggleState> {
   return {
-    claude,
-    codex,
-    modelInvocation: fm['disable-model-invocation'] !== true,
-    userInvocable: fm['user-invocable'] !== false,
+    claude: await readClaudeOverride(skill, files),
+    codex: await readCodexEnabled(skill, files),
+    modelInvocation: skill.frontmatter[DISABLE_MODEL_INVOCATION_KEY] !== true,
+    userInvocable: skill.frontmatter[USER_INVOCABLE_KEY] !== false,
   };
 }
 
 // ---------- writes (backup + atomic replace) ----------
-
-async function replaceFile(file: string, next: string, backupRoot: string): Promise<string | undefined> {
-  let backup: string | undefined;
-  const prev = await fs.readFile(file, 'utf8').catch(() => undefined);
-  if (prev !== undefined) {
-    if (prev === next) return undefined;
-    await fs.mkdir(backupRoot, { recursive: true });
-    backup = path.join(backupRoot, `${timestamp()}-${path.basename(path.dirname(file))}-${path.basename(file)}`);
-    await fs.writeFile(backup, prev, { flag: 'wx', mode: 0o644 });
-  }
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${randomBytes(4).toString('hex')}.tmp`);
-  try {
-    await fs.writeFile(tmp, next, { flag: 'wx', mode: 0o644 });
-    await fs.rename(tmp, file);
-  } catch (e) {
-    await fs.rm(tmp, { force: true }).catch(() => undefined);
-    throw e;
-  }
-  return backup;
-}
 
 /** Claude Code: write `skillOverrides[name]` ("on" removes the key) in one settings file. */
 export async function setClaudeOverride(file: string, skillName: string, value: ClaudeOverride, backupRoot: string): Promise<string | undefined> {
@@ -219,16 +240,16 @@ export async function setClaudeOverride(file: string, skillName: string, value: 
   const overrides = { ...overridesOf(settings) };
   if (value === 'on') delete overrides[skillName];
   else overrides[skillName] = value;
-  const next = { ...settings };
-  if (Object.keys(overrides).length) next['skillOverrides'] = overrides;
-  else delete next['skillOverrides'];
-  return replaceFile(file, JSON.stringify(next, null, 2) + '\n', backupRoot);
+  const nextSettings = { ...settings };
+  if (Object.keys(overrides).length) nextSettings[SKILL_OVERRIDES_KEY] = overrides;
+  else delete nextSettings[SKILL_OVERRIDES_KEY];
+  return replaceWithBackup(file, JSON.stringify(nextSettings, null, 2) + '\n', backupRoot);
 }
 
 /** Codex: `[[skills.config]] path = <SKILL.md> enabled = …` in ~/.codex/config.toml. */
 export async function setCodexEnabled(configFile: string, skillMd: string, enabled: boolean, backupRoot: string): Promise<string | undefined> {
-  const prev = await fs.readFile(configFile, 'utf8').catch(() => '');
-  return replaceFile(configFile, setCodexSkillEnabled(prev, skillMd, enabled), backupRoot);
+  const currentConfig = await fs.readFile(configFile, 'utf8').catch(() => '');
+  return replaceWithBackup(configFile, setCodexSkillEnabled(currentConfig, skillMd, enabled), backupRoot);
 }
 
 /** Frontmatter flags in the skill itself (Cursor, Copilot, Claude Code). */
@@ -236,17 +257,17 @@ export async function setInvocationFlags(skill: SkillRecord, flags: { modelInvoc
   if (skill.readOnly) throw new UserError(`"${skill.name}" is read-only: ${skill.readOnlyReason ?? ''}`.trim(), 'toggle');
   const file = path.join(skill.realDir, 'SKILL.md');
   const original = await fs.readFile(file, 'utf8');
-  let next = setBoolKey(original, 'disable-model-invocation', !flags.modelInvocation);
-  next = setBoolKey(next, 'user-invocable', flags.userInvocable);
-  return replaceFile(file, next, backupRoot);
+  const withModelFlag = setBooleanKey(original, DISABLE_MODEL_INVOCATION_KEY, !flags.modelInvocation);
+  const withBothFlags = setBooleanKey(withModelFlag, USER_INVOCABLE_KEY, flags.userInvocable);
+  return replaceWithBackup(file, withBothFlags, backupRoot);
 }
 
-/** Sets a boolean frontmatter key; the default value removes nothing but writes it explicitly only when needed. */
-function setBoolKey(source: string, key: string, value: boolean): string {
-  const fm = parseFrontmatter(source);
-  const defaults: Record<string, boolean> = { 'disable-model-invocation': false, 'user-invocable': true };
-  if (!(key in fm.data) && value === defaults[key]) return source;
-  // setFrontmatterKey quotes strings; write the YAML boolean by replacing the quoted value.
-  const withString = setFrontmatterKey(source, key, String(value));
-  return withString.replace(new RegExp(`^(${key}:\\s*)"${value}"`, 'm'), `$1${value}`);
+/** Sets a boolean frontmatter key, but leaves the file alone when the key is absent and the value is the default. */
+function setBooleanKey(source: string, key: string, value: boolean): string {
+  const keyIsPresent = key in parseFrontmatter(source).data;
+  if (!keyIsPresent && value === FRONTMATTER_DEFAULTS[key]) return source;
+  // setFrontmatterKey writes a quoted string; unquote it so YAML reads a boolean.
+  const withQuotedValue = setFrontmatterKey(source, key, String(value));
+  const quotedValue = new RegExp(`^(${key}:\\s*)"${value}"`, 'm');
+  return withQuotedValue.replace(quotedValue, `$1${value}`);
 }
