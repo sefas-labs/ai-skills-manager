@@ -23,87 +23,48 @@ export async function activate(context: vscode.ExtensionContext): Promise<Intern
   const view = vscode.window.createTreeView('skillsManager.tree', { treeDataProvider: tree, showCollapseAll: true });
 
   const updateBadge = () => {
-    const r = service.current;
-    if (!r) return;
-    const withProblems = r.skills.filter((s) => s.issues.some((i) => i.severity !== 'info')).length;
+    const result = service.current;
+    if (!result) return;
+    const withProblems = result.skills.filter((skill) => skill.issues.some((issue) => issue.severity !== 'info')).length;
     view.badge = withProblems ? { value: withProblems, tooltip: `${withProblems} skill(s) with problems` } : undefined;
   };
 
-  const cmd = (id: string, fn: (...args: unknown[]) => unknown) => context.subscriptions.push(vscode.commands.registerCommand(id, fn));
+  const command = (id: string, handler: (...args: unknown[]) => unknown) => context.subscriptions.push(vscode.commands.registerCommand(id, handler));
+  /** A command that acts on one skill, given as a tree node or a skill id. */
+  const skillCommand = (id: string, action: (skillId: string) => unknown) =>
+    command(id, (argument) => {
+      const skillId = skillIdFrom(argument);
+      if (skillId) return action(skillId);
+    });
 
-  cmd('skillsManager.openDashboard', () => DashboardPanel.show(context, service, { type: 'focus', tab: 'overview' }));
-  cmd('skillsManager.refresh', () => service.refresh());
-  cmd('skillsManager.installFromGitHub', async (url?: unknown) => {
-    let input = typeof url === 'string' ? url : undefined;
-    if (!input) {
-      input = await vscode.window.showInputBox({
-        title: 'Install skills from GitHub',
-        prompt: 'Repository or folder URL. Nothing is installed until you review and confirm.',
-        placeHolder: 'https://github.com/owner/repo  or  https://github.com/owner/repo/tree/main/skills/name',
-        ignoreFocusOut: true,
-        validateInput: (v) => {
-          if (!v.trim()) return undefined;
-          try {
-            parseGitHubUrl(v);
-            return undefined;
-          } catch (e) {
-            return (e as Error).message;
-          }
-        },
-      });
-    }
+  command('skillsManager.openDashboard', () => DashboardPanel.show(context, service, { type: 'focus', tab: 'overview' }));
+  command('skillsManager.refresh', () => service.refresh());
+  command('skillsManager.installFromGitHub', async (url?: unknown) => {
+    const input = typeof url === 'string' ? url : await askForGitHubUrl();
     if (!input) {
       DashboardPanel.show(context, service, { type: 'focus', tab: 'install' });
       return;
     }
     DashboardPanel.show(context, service, { type: 'focus', tab: 'install', url: input, autoInspect: true });
   });
-  cmd('skillsManager.showInDashboard', (arg) => {
-    const id = skillIdFrom(arg);
-    DashboardPanel.show(context, service, { type: 'focus', tab: 'skills', skillId: id });
+  command('skillsManager.showInDashboard', (argument) => {
+    DashboardPanel.show(context, service, { type: 'focus', tab: 'skills', skillId: skillIdFrom(argument) });
   });
-  cmd('skillsManager.openSkillFile', (arg) => {
-    const id = skillIdFrom(arg);
-    if (id) return openSkillFile(service, id);
-  });
-  cmd('skillsManager.revealSkill', (arg) => {
-    const id = skillIdFrom(arg);
-    if (id) return revealSkill(service, id);
-  });
-  cmd('skillsManager.copySkillPath', (arg) => {
-    const id = skillIdFrom(arg);
-    if (id) return copySkillPath(service, id);
-  });
-  cmd('skillsManager.uninstall', (arg) => {
-    const id = skillIdFrom(arg);
-    if (id) return confirmAndUninstall(service, id);
-  });
-  cmd('skillsManager.copyMoveSkill', (arg) => {
-    const id = skillIdFrom(arg);
-    if (id) return copyOrMoveSkill(service, id);
-  });
-  cmd('skillsManager.fixSkill', (arg) => {
-    const id = skillIdFrom(arg);
-    if (id) return fixSkill(service, id);
-  });
-  cmd('skillsManager.chooseCopy', (arg) => {
-    const id = skillIdFrom(arg);
-    if (id) return chooseCopy(service, id);
-  });
-  cmd('skillsManager.addToProject', (arg) => {
-    const id = skillIdFrom(arg);
-    if (id) return copyOrMoveSkill(service, id, { toProject: true });
-  });
-  cmd('skillsManager.checkUpdates', () => checkForUpdates(service, true));
-  cmd('skillsManager.updateSkill', (arg) => {
-    const id = skillIdFrom(arg);
-    if (id) return confirmAndUpdate(service, id);
-  });
-  cmd('skillsManager.signInGitHub', async () => {
+  skillCommand('skillsManager.openSkillFile', (skillId) => openSkillFile(service, skillId));
+  skillCommand('skillsManager.revealSkill', (skillId) => revealSkill(service, skillId));
+  skillCommand('skillsManager.copySkillPath', (skillId) => copySkillPath(service, skillId));
+  skillCommand('skillsManager.uninstall', (skillId) => confirmAndUninstall(service, skillId));
+  skillCommand('skillsManager.copyMoveSkill', (skillId) => copyOrMoveSkill(service, skillId));
+  skillCommand('skillsManager.fixSkill', (skillId) => fixSkill(service, skillId));
+  skillCommand('skillsManager.chooseCopy', (skillId) => chooseCopy(service, skillId));
+  skillCommand('skillsManager.addToProject', (skillId) => copyOrMoveSkill(service, skillId, { toProject: true }));
+  skillCommand('skillsManager.updateSkill', (skillId) => confirmAndUpdate(service, skillId));
+  command('skillsManager.checkUpdates', () => checkForUpdates(service, true));
+  command('skillsManager.signInGitHub', async () => {
     const token = await getGitHubToken(service, 'public');
     if (token) vscode.window.showInformationMessage('Signed in to GitHub. Higher API limits are now used for installs.');
   });
-  cmd('skillsManager.openBackups', async () => {
+  command('skillsManager.openBackups', async () => {
     await vscode.workspace.fs.createDirectory(vscode.Uri.file(service.backupDir));
     await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(service.backupDir));
   });
@@ -115,8 +76,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<Intern
     .then(() => {
       if (vscode.workspace.getConfiguration('skillsManager').get<boolean>('checkForUpdatesOnStartup')) return checkForUpdates(service, false);
     })
-    .catch((e) => console.error('[skills-manager] initial scan failed', e));
+    .catch((error) => console.error('[skills-manager] initial scan failed', error));
   return { service, tree, dashboardReady: () => DashboardPanel.current?.isReady ?? false, dashboardError: () => DashboardPanel.current?.lastClientError };
+}
+
+function urlValidationMessage(value: string): string | undefined {
+  if (!value.trim()) return undefined;
+  try {
+    parseGitHubUrl(value);
+    return undefined;
+  } catch (error) {
+    return (error as Error).message;
+  }
+}
+
+function askForGitHubUrl(): Thenable<string | undefined> {
+  return vscode.window.showInputBox({
+    title: 'Install skills from GitHub',
+    prompt: 'Repository or folder URL. Nothing is installed until you review and confirm.',
+    placeHolder: 'https://github.com/owner/repo  or  https://github.com/owner/repo/tree/main/skills/name',
+    ignoreFocusOut: true,
+    validateInput: urlValidationMessage,
+  });
 }
 
 export function deactivate(): void {

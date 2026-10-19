@@ -7,23 +7,25 @@ import type { SkillsService } from './service';
 
 export const GITHUB_SCOPES = { public: ['read:user'], private: ['repo'] };
 
+const STATUS_MESSAGE_MS = 2500;
+
 /** Uses an existing GitHub sign-in silently; never prompts unless asked. The token stays in memory. */
 export async function getGitHubToken(service: SkillsService, interactive?: 'public' | 'private'): Promise<string | undefined> {
   try {
     if (interactive) {
-      const s = await vscode.authentication.getSession('github', GITHUB_SCOPES[interactive], { createIfNone: true });
-      service.githubSignedIn = !!s;
-      return s?.accessToken;
+      const session = await vscode.authentication.getSession('github', GITHUB_SCOPES[interactive], { createIfNone: true });
+      service.githubSignedIn = !!session;
+      return session?.accessToken;
     }
     for (const scopes of [GITHUB_SCOPES.private, GITHUB_SCOPES.public]) {
-      const s = await vscode.authentication.getSession('github', scopes, { silent: true });
-      if (s) {
+      const session = await vscode.authentication.getSession('github', scopes, { silent: true });
+      if (session) {
         service.githubSignedIn = true;
-        return s.accessToken;
+        return session.accessToken;
       }
     }
   } catch {
-    // No GitHub auth provider (possible in some forks) or user cancelled: continue unauthenticated.
+    // No GitHub auth provider (possible in some forks) or the user cancelled: continue unauthenticated.
   }
   service.githubSignedIn = false;
   return undefined;
@@ -35,54 +37,53 @@ export async function makeGitHubClient(service: SkillsService): Promise<GitHubCl
 }
 
 export async function openSkillFile(service: SkillsService, skillId: string): Promise<void> {
-  const s = service.skill(skillId);
-  if (!s) return;
-  await vscode.window.showTextDocument(vscode.Uri.file(s.skillFile), { preview: true });
+  const skill = service.skill(skillId);
+  if (skill) await vscode.window.showTextDocument(vscode.Uri.file(skill.skillFile), { preview: true });
 }
 
 export async function revealSkill(service: SkillsService, skillId: string): Promise<void> {
-  const s = service.skill(skillId);
-  if (!s) return;
-  await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(s.skillFile));
+  const skill = service.skill(skillId);
+  if (skill) await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(skill.skillFile));
 }
 
 export async function copySkillPath(service: SkillsService, skillId: string): Promise<void> {
-  const s = service.skill(skillId);
-  if (!s) return;
-  await vscode.env.clipboard.writeText(s.dir);
-  vscode.window.setStatusBarMessage(`Copied ${s.dir}`, 2500);
+  const skill = service.skill(skillId);
+  if (!skill) return;
+  await vscode.env.clipboard.writeText(skill.dir);
+  vscode.window.setStatusBarMessage(`Copied ${skill.dir}`, STATUS_MESSAGE_MS);
 }
 
 export async function confirmAndUninstall(service: SkillsService, skillId: string): Promise<boolean> {
-  const s = service.skill(skillId);
-  if (!s) return false;
-  const loc = service.location(s.locationId);
-  if (!loc) return false;
-  if (s.readOnly || loc.readOnly) {
-    vscode.window.showWarningMessage(`"${s.name}" can't be removed here: ${s.readOnlyReason ?? loc.readOnlyReason ?? 'read-only location'}`);
+  const skill = service.skill(skillId);
+  const location = skill && service.location(skill.locationId);
+  if (!skill || !location) return false;
+  if (skill.readOnly || location.readOnly) {
+    const reason = skill.readOnlyReason ?? location.readOnlyReason ?? 'read-only location';
+    vscode.window.showWarningMessage(`"${skill.name}" can't be removed here: ${reason}`);
     return false;
   }
   const home = service.current?.context.homeDir ?? '';
-  const who = s.visibleTo.map((p) => service.providerName(p)).join(', ') || 'no agent';
-  const detail = s.isSymlink
-    ? `This is a symbolic link. Only the link in ${loc.label} is removed; its target (${tildify(s.realDir, home)}) is not touched.\n\nIt will stop being available to: ${who}.`
-    : `The folder ${tildify(s.dir, home)} will be moved to the extension's backup folder (recoverable).\n\nIt will stop being available to: ${who}.`;
-  const choice = await vscode.window.showWarningMessage(`Remove skill "${s.name}" from ${loc.label}?`, { modal: true, detail }, 'Remove');
+  const losingAgents = service.agentNames(skill.visibleTo, 'no agent');
+  const whatHappens = skill.isSymlink
+    ? `This is a symbolic link. Only the link in ${location.label} is removed; its target (${tildify(skill.realDir, home)}) is not touched.`
+    : `The folder ${tildify(skill.dir, home)} will be moved to the extension's backup folder (recoverable).`;
+  const detail = `${whatHappens}\n\nIt will stop being available to: ${losingAgents}.`;
+  const choice = await vscode.window.showWarningMessage(`Remove skill "${skill.name}" from ${location.label}?`, { modal: true, detail }, 'Remove');
   if (choice !== 'Remove') return false;
   try {
-    const r = await uninstallSkill(s, loc, { lock: service.lock, trashRoot: service.backupDir });
+    const result = await uninstallSkill(skill, location, { lock: service.lock, trashRoot: service.backupDir });
     await service.refresh();
-    if (r.kind === 'moved' && r.backupDir) {
-      const backup = r.backupDir;
-      vscode.window.showInformationMessage(`Removed "${s.name}". A backup was kept.`, 'Show Backup').then((c) => {
-        if (c) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(backup));
+    const backupDir = result.backupDir;
+    if (result.kind === 'moved' && backupDir) {
+      vscode.window.showInformationMessage(`Removed "${skill.name}". A backup was kept.`, 'Show Backup').then((answer) => {
+        if (answer) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(backupDir));
       });
     } else {
-      vscode.window.showInformationMessage(`Removed link "${s.name}".`);
+      vscode.window.showInformationMessage(`Removed link "${skill.name}".`);
     }
     return true;
-  } catch (e) {
-    vscode.window.showErrorMessage(e instanceof UserError ? e.message : `Could not remove "${s.name}": ${(e as Error).message}`);
+  } catch (error) {
+    vscode.window.showErrorMessage(error instanceof UserError ? error.message : `Could not remove "${skill.name}": ${(error as Error).message}`);
     return false;
   }
 }

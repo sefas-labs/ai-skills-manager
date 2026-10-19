@@ -1,193 +1,226 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { cleanupStaging, commitInstall, planInstall } from '../core/installer';
-import { worstSeverity } from '../core/inspector';
+import { worstSeverity, type Finding } from '../core/inspector';
 import { pathKey } from '../core/paths';
 import { trackedFromLock } from '../core/provenance';
 import { basisOf, checkUpdates, isEmptyDiff, prepareUpdate, type FileDiff, type UpdatePreview } from '../core/updates';
-import { UserError } from '../core/types';
+import { ResolvedLocation, SkillRecord, TrackedSource, UserError } from '../core/types';
 import { makeGitHubClient } from './actions';
 import type { SkillsService } from './service';
 
-const STARTUP_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const HOURS_TO_MS = 60 * 60 * 1000;
+/** The optional startup check reuses results younger than this. */
+const STARTUP_CACHE_MAX_AGE_MS = 12 * HOURS_TO_MS;
+const SHORT_COMMIT_LENGTH = 7;
+const MAX_FILES_PER_DIFF_SECTION = 12;
+const MAX_FINDINGS_SHOWN = 8;
+const COMPARE_FILES = 'Compare Files…';
+const UPDATE_WITH_GH = 'Update with gh skill…';
+const CONTINUE_AFTER_REVIEW = 'I reviewed them, continue';
+
+function shortCommit(commit: string): string {
+  return commit.slice(0, SHORT_COMMIT_LENGTH);
+}
+
+function isRecent(isoDate: string | undefined, maxAgeMs: number): boolean {
+  const checkedAt = isoDate ? Date.parse(isoDate) : 0;
+  return Date.now() - checkedAt < maxAgeMs;
+}
 
 /** Manual check (interactive=true) or the optional startup check, which reuses a recent cache and never prompts. */
 export async function checkForUpdates(service: SkillsService, interactive: boolean): Promise<void> {
-  if (!interactive) {
-    const last = service.updatesCheckedAt ? Date.parse(service.updatesCheckedAt) : 0;
-    if (Date.now() - last < STARTUP_MAX_AGE_MS) return;
-  }
+  if (!interactive && isRecent(service.updatesCheckedAt, STARTUP_CACHE_MAX_AGE_MS)) return;
   if (!service.current) await service.refresh();
   const items = service.updatable().map(({ skill, source }) => ({ key: skill.dir, source }));
   if (items.length === 0) {
     if (interactive) vscode.window.showInformationMessage('No skills with known GitHub provenance (installed here or with `gh skill`).');
     return;
   }
-  const run = async () => {
-    const client = await makeGitHubClient(service);
-    const results = await checkUpdates(client, items);
+  const checkAll = async () => {
+    const results = await checkUpdates(await makeGitHubClient(service), items);
     await service.storeUpdates(results, true);
     return Object.values(results);
   };
   try {
     const results = interactive
-      ? await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Checking ${items.length} skill(s) for updates…` }, run)
-      : await run();
+      ? await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Checking ${items.length} skill(s) for updates…` }, checkAll)
+      : await checkAll();
     if (!interactive) return;
-    const n = results.filter((r) => r.status === 'update-available' || r.status === 'unknown').length;
-    const err = results.find((r) => r.status === 'error');
-    if (err) vscode.window.showWarningMessage(`Some update checks failed: ${err.message}`);
-    else vscode.window.showInformationMessage(n ? `${n} skill update(s) available.` : 'All tracked skills are up to date.');
-  } catch (e) {
-    if (interactive) vscode.window.showErrorMessage(e instanceof UserError ? e.message : `Update check failed: ${(e as Error).message}`);
+    const updateCount = results.filter((result) => result.status === 'update-available' || result.status === 'unknown').length;
+    const failed = results.find((result) => result.status === 'error');
+    if (failed) vscode.window.showWarningMessage(`Some update checks failed: ${failed.message}`);
+    else vscode.window.showInformationMessage(updateCount ? `${updateCount} skill update(s) available.` : 'All tracked skills are up to date.');
+  } catch (error) {
+    if (interactive) vscode.window.showErrorMessage(error instanceof UserError ? error.message : `Update check failed: ${(error as Error).message}`);
   }
 }
 
-function list(title: string, files: string[], max = 12): string[] {
+function fileSection(title: string, files: string[]): string[] {
   if (!files.length) return [];
-  const shown = files.slice(0, max).map((f) => `    ${f}`);
-  if (files.length > max) shown.push(`    … and ${files.length - max} more`);
+  const shown = files.slice(0, MAX_FILES_PER_DIFF_SECTION).map((file) => `    ${file}`);
+  const hiddenCount = files.length - MAX_FILES_PER_DIFF_SECTION;
+  if (hiddenCount > 0) shown.push(`    … and ${hiddenCount} more`);
   return [`  ${title} (${files.length}):`, ...shown];
 }
 
-function describeDiff(d: FileDiff): string[] {
-  return [...list('Added', d.added), ...list('Modified', d.modified), ...list('Removed', d.removed)];
+function describeDiff(diff: FileDiff): string[] {
+  return [...fileSection('Added', diff.added), ...fileSection('Modified', diff.modified), ...fileSection('Removed', diff.removed)];
+}
+
+function allChangedFiles(diff: FileDiff): string[] {
+  return [...diff.added, ...diff.modified, ...diff.removed];
+}
+
+/** Why this skill can't be updated in place, or undefined when it can. */
+function updateBlocker(skill: SkillRecord, location: ResolvedLocation): string | undefined {
+  if (skill.isSymlink) return `"${skill.name}" is a link. Update the original folder instead: ${skill.realDir}`;
+  if (skill.readOnly || location.readOnly) return `"${skill.name}" can't be updated here: ${skill.readOnlyReason ?? location.readOnlyReason ?? 'read-only location'}`;
+  if (pathKey(path.dirname(skill.dir)) !== pathKey(location.path)) return `"${skill.name}" is not directly inside ${location.label}; refusing to update it.`;
+  return undefined;
+}
+
+async function acceptHighRiskFindings(skillName: string, findings: Finding[]): Promise<boolean> {
+  if (worstSeverity(findings) !== 'high') return true;
+  const highRisk = findings.filter((finding) => finding.severity === 'high');
+  const listed = highRisk
+    .slice(0, MAX_FINDINGS_SHOWN)
+    .map((finding) => `• ${finding.file}${finding.line ? `:${finding.line}` : ''} — ${finding.message}`)
+    .join('\n');
+  const answer = await vscode.window.showWarningMessage(
+    `The new version of "${skillName}" has ${highRisk.length} high-risk finding(s).`,
+    { modal: true, detail: `${listed}\n\nSkills are instructions your agent follows and may include scripts it can run. Only update from sources you trust.` },
+    CONTINUE_AFTER_REVIEW,
+  );
+  return !!answer;
+}
+
+function localEditsSummary(preview: UpdatePreview): string[] {
+  if (!preview.local) return ['Local edits: unknown (the installed version is not available to compare).'];
+  const editedCount = allChangedFiles(preview.local).length;
+  const headline = editedCount ? `⚠ Your local edits will be replaced (${editedCount} file(s)):` : 'No local edits since install.';
+  return [headline, ...describeDiff(preview.local)];
+}
+
+function updateDetail(service: SkillsService, skill: SkillRecord, location: ResolvedLocation, source: TrackedSource, preview: UpdatePreview): string {
+  const fromVersion = preview.fromCommit ? shortCommit(preview.fromCommit) : 'installed';
+  const comparedWith = preview.upstreamBase === 'local' ? ' (compared with your local copy)' : '';
+  return [
+    `From: ${source.owner}/${source.repo}/${source.subpath} (${source.ref})`,
+    `Version: ${fromVersion} → ${shortCommit(preview.toCommit)}`,
+    `Folder: ${skill.dir}`,
+    `Visible to: ${service.agentNames(location.readers, '')}`,
+    '',
+    `Upstream changes${comparedWith}:`,
+    ...describeDiff(preview.upstream),
+    '',
+    ...localEditsSummary(preview),
+    ...preview.notes.map((note) => `\nNote: ${note}`),
+    '',
+    'The current folder is moved to a backup first. Nothing is executed; files are written without execute permission.',
+  ].join('\n');
+}
+
+/** Shows the update modal until the user updates, cancels or hands over to gh. True to update here. */
+async function confirmUpdate(skill: SkillRecord, source: TrackedSource, preview: UpdatePreview, detail: string): Promise<boolean> {
+  const hasLocalEdits = !!preview.local && allChangedFiles(preview.local).length > 0;
+  const updateAction = hasLocalEdits ? 'Replace Local Edits and Update' : 'Update';
+  const extraActions = source.origin === 'gh-skill' ? [UPDATE_WITH_GH] : [];
+  for (;;) {
+    const choice = await vscode.window.showInformationMessage(`Update "${skill.name}"?`, { modal: true, detail }, updateAction, COMPARE_FILES, ...extraActions);
+    if (choice === COMPARE_FILES) {
+      await compareFiles(skill.dir, preview);
+      continue;
+    }
+    if (choice === UPDATE_WITH_GH) {
+      typeGhUpdateCommand(skill.dirName, path.dirname(skill.dir));
+      return false;
+    }
+    return choice === updateAction;
+  }
+}
+
+async function rememberCheck(service: SkillsService, skillDir: string, status: 'up-to-date' | 'update-available', basis: string, remoteCommit: string): Promise<void> {
+  await service.storeUpdates({ [skillDir]: { status, checkedAt: new Date().toISOString(), basis, remoteCommit } }, false);
 }
 
 /** Review an update in native modals (diff, local edits, findings), then replace with a backup. */
 export async function confirmAndUpdate(service: SkillsService, skillId: string): Promise<boolean> {
-  const s = service.skill(skillId);
-  if (!s) return false;
-  const loc = service.location(s.locationId);
-  const source = service.tracked(s);
-  if (!loc || !source) {
-    vscode.window.showInformationMessage(`"${s.name}" has no known GitHub source to update from.`);
+  const skill = service.skill(skillId);
+  if (!skill) return false;
+  const location = service.location(skill.locationId);
+  const source = service.tracked(skill);
+  if (!location || !source) {
+    vscode.window.showInformationMessage(`"${skill.name}" has no known GitHub source to update from.`);
     return false;
   }
-  if (s.isSymlink) {
-    vscode.window.showWarningMessage(`"${s.name}" is a link. Update the original folder instead: ${s.realDir}`);
-    return false;
-  }
-  if (s.readOnly || loc.readOnly) {
-    vscode.window.showWarningMessage(`"${s.name}" can't be updated here: ${s.readOnlyReason ?? loc.readOnlyReason ?? 'read-only location'}`);
-    return false;
-  }
-  if (pathKey(path.dirname(s.dir)) !== pathKey(loc.path)) {
-    vscode.window.showWarningMessage(`"${s.name}" is not directly inside ${loc.label}; refusing to update it.`);
+  const blocker = updateBlocker(skill, location);
+  if (blocker) {
+    vscode.window.showWarningMessage(blocker);
     return false;
   }
 
   let preview: UpdatePreview | undefined;
   try {
-    preview = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `Downloading the latest "${s.name}" for review…` },
-      async () => prepareUpdate(await makeGitHubClient(service), { source, skillDir: s.dir, stagingRoot: service.stagingDir }),
+    preview = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Downloading the latest "${skill.name}" for review…` }, async () =>
+      prepareUpdate(await makeGitHubClient(service), { source, skillDir: skill.dir, stagingRoot: service.stagingDir }),
     );
-    const p = preview;
-    await service.storeUpdates(
-      { [s.dir]: { status: isEmptyDiff(p.upstream) ? 'up-to-date' : 'update-available', checkedAt: new Date().toISOString(), basis: basisOf(source), remoteCommit: p.toCommit } },
-      false,
-    );
-    if (isEmptyDiff(p.upstream)) {
-      vscode.window.showInformationMessage(`"${s.name}" is already up to date with ${source.ref}.`);
+    const upToDate = isEmptyDiff(preview.upstream);
+    await rememberCheck(service, skill.dir, upToDate ? 'up-to-date' : 'update-available', basisOf(source), preview.toCommit);
+    if (upToDate) {
+      vscode.window.showInformationMessage(`"${skill.name}" is already up to date with ${source.ref}.`);
       return false;
     }
+    if (!(await acceptHighRiskFindings(skill.name, preview.staged.findings))) return false;
+    if (!(await confirmUpdate(skill, source, preview, updateDetail(service, skill, location, source, preview)))) return false;
 
-    const findings = p.staged.findings;
-    if (worstSeverity(findings) === 'high') {
-      const n = findings.filter((f) => f.severity === 'high').length;
-      const detail = findings
-        .filter((f) => f.severity === 'high')
-        .slice(0, 8)
-        .map((f) => `• ${f.file}${f.line ? `:${f.line}` : ''} — ${f.message}`)
-        .join('\n');
-      const ok = await vscode.window.showWarningMessage(
-        `The new version of "${s.name}" has ${n} high-risk finding(s).`,
-        { modal: true, detail: `${detail}\n\nSkills are instructions your agent follows and may include scripts it can run. Only update from sources you trust.` },
-        'I reviewed them, continue',
-      );
-      if (!ok) return false;
-    }
-
-    const who = loc.readers.map((r) => service.providerName(r)).join(', ');
-    const localEdits = p.local ? [...p.local.added, ...p.local.modified, ...p.local.removed] : [];
-    const detail = [
-      `From: ${source.owner}/${source.repo}/${source.subpath} (${source.ref})`,
-      `Version: ${p.fromCommit ? p.fromCommit.slice(0, 7) : 'installed'} → ${p.toCommit.slice(0, 7)}`,
-      `Folder: ${s.dir}`,
-      `Visible to: ${who}`,
-      '',
-      `Upstream changes${p.upstreamBase === 'local' ? ' (compared with your local copy)' : ''}:`,
-      ...describeDiff(p.upstream),
-      '',
-      p.local
-        ? localEdits.length
-          ? `⚠ Your local edits will be replaced (${localEdits.length} file(s)):`
-          : 'No local edits since install.'
-        : 'Local edits: unknown (the installed version is not available to compare).',
-      ...(p.local ? describeDiff(p.local) : []),
-      ...p.notes.map((n) => `\nNote: ${n}`),
-      '',
-      'The current folder is moved to a backup first. Nothing is executed; files are written without execute permission.',
-    ].join('\n');
-
-    for (;;) {
-      const action = localEdits.length ? 'Replace Local Edits and Update' : 'Update';
-      const viaGh = source.origin === 'gh-skill' ? ['Update with gh skill…'] : [];
-      const choice = await vscode.window.showInformationMessage(`Update "${s.name}"?`, { modal: true, detail }, action, 'Compare Files…', ...viaGh);
-      if (choice === 'Compare Files…') {
-        await compareFiles(s.dir, p);
-        continue;
-      }
-      if (choice === 'Update with gh skill…') {
-        openGhUpdate(s.dirName, path.dirname(s.dir));
-        return false;
-      }
-      if (choice !== action) return false;
-      break;
-    }
-
-    const plans = await planInstall([p.staged], loc);
-    await commitInstall(plans, true, { lock: service.lock, backupRoot: service.backupDir, inspection: p.inspection });
-    const now = service.lock.get(s.dir);
-    if (now) {
-      await service.storeUpdates({ [s.dir]: { status: 'up-to-date', checkedAt: new Date().toISOString(), basis: basisOf(trackedFromLock(now)), remoteCommit: p.toCommit } }, false);
-    }
+    const plans = await planInstall([preview.staged], location);
+    await commitInstall(plans, true, { lock: service.lock, backupRoot: service.backupDir, inspection: preview.inspection });
+    const newLockEntry = service.lock.get(skill.dir);
+    if (newLockEntry) await rememberCheck(service, skill.dir, 'up-to-date', basisOf(trackedFromLock(newLockEntry)), preview.toCommit);
     await service.refresh();
-    vscode.window.showInformationMessage(`Updated "${s.name}" to ${p.toCommit.slice(0, 7)}. The previous version was kept as a backup.`, 'Show Backups').then((c) => {
-      if (c) vscode.commands.executeCommand('skillsManager.openBackups');
-    });
+    vscode.window
+      .showInformationMessage(`Updated "${skill.name}" to ${shortCommit(preview.toCommit)}. The previous version was kept as a backup.`, 'Show Backups')
+      .then((choice) => {
+        if (choice) vscode.commands.executeCommand('skillsManager.openBackups');
+      });
     return true;
-  } catch (e) {
-    vscode.window.showErrorMessage(e instanceof UserError ? e.message : `Update of "${s.name}" failed: ${(e as Error).message}`);
+  } catch (error) {
+    vscode.window.showErrorMessage(error instanceof UserError ? error.message : `Update of "${skill.name}" failed: ${(error as Error).message}`);
     return false;
   } finally {
     if (preview) await cleanupStaging([preview.staged]);
   }
 }
 
+function shellQuote(value: string): string {
+  if (process.platform === 'win32') return `"${value.replace(/"/g, '""')}"`;
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /** Types (doesn't run) `gh skill update` for this skill in a terminal, keeping gh's own provenance tracking. */
-function openGhUpdate(skill: string, dir: string): void {
-  const q = (v: string) => (process.platform === 'win32' ? `"${v.replace(/"/g, '""')}"` : `'${v.replace(/'/g, `'\\''`)}'`);
-  const term = vscode.window.createTerminal({ name: 'gh skill update' });
-  term.show();
-  term.sendText(`gh skill update ${q(skill)} --dir ${q(dir)}`, false);
+function typeGhUpdateCommand(skillName: string, dir: string): void {
+  const terminal = vscode.window.createTerminal({ name: 'gh skill update' });
+  terminal.show();
+  const pressEnterToRun = false;
+  terminal.sendText(`gh skill update ${shellQuote(skillName)} --dir ${shellQuote(dir)}`, pressEnterToRun);
   vscode.window.showInformationMessage('The gh command is typed in the terminal — review it and press Enter to run it.');
 }
 
-async function compareFiles(skillDir: string, p: UpdatePreview): Promise<void> {
+async function compareFiles(skillDir: string, preview: UpdatePreview): Promise<void> {
+  type Change = 'modified upstream' | 'added upstream' | 'removed upstream';
+  const item = (file: string, change: Change) => ({ label: file, description: change });
   const items = [
-    ...p.upstream.modified.map((f) => ({ label: f, description: 'modified upstream' })),
-    ...p.upstream.added.map((f) => ({ label: f, description: 'added upstream' })),
-    ...p.upstream.removed.map((f) => ({ label: f, description: 'removed upstream' })),
+    ...preview.upstream.modified.map((file) => item(file, 'modified upstream')),
+    ...preview.upstream.added.map((file) => item(file, 'added upstream')),
+    ...preview.upstream.removed.map((file) => item(file, 'removed upstream')),
   ];
-  const pick = await vscode.window.showQuickPick(items, { title: 'Compare local file with the new version' });
-  if (!pick) return;
-  const local = vscode.Uri.file(path.join(skillDir, pick.label));
-  const next = vscode.Uri.file(path.join(p.staged.stagingDir, pick.label));
-  const empty = vscode.Uri.parse('untitled:' + pick.label);
-  const left = pick.description === 'added upstream' ? empty : local;
-  const right = pick.description === 'removed upstream' ? empty : next;
-  await vscode.commands.executeCommand('vscode.diff', left, right, `${pick.label} (local ↔ new)`, { preview: true });
+  const picked = await vscode.window.showQuickPick(items, { title: 'Compare local file with the new version' });
+  if (!picked) return;
+  const emptyDocument = vscode.Uri.parse('untitled:' + picked.label);
+  const localFile = vscode.Uri.file(path.join(skillDir, picked.label));
+  const newFile = vscode.Uri.file(path.join(preview.staged.stagingDir, picked.label));
+  const left = picked.description === 'added upstream' ? emptyDocument : localFile;
+  const right = picked.description === 'removed upstream' ? emptyDocument : newFile;
+  await vscode.commands.executeCommand('vscode.diff', left, right, `${picked.label} (local ↔ new)`, { preview: true });
 }
-

@@ -7,7 +7,18 @@ import { makeGitHubClient } from './actions';
 import { log } from './log';
 import type { SkillsService } from './service';
 
-const LIST_TTL_MS = 30 * 60 * 1000;
+const MINUTES_TO_MS = 60 * 1000;
+const LIST_TTL_MS = 30 * MINUTES_TO_MS;
+const SAVE_DELAY_MS = 1000;
+/** Keep the newest entries only, so the cache file stays small. */
+const MAX_CACHED_DESCRIPTIONS = 5000;
+
+interface CachedListing {
+  listedAt: number;
+  ref: string;
+  skills: CatalogSkill[];
+  truncated: boolean;
+}
 
 /**
  * Catalog state for the Install tab. Collections are listed on demand and kept
@@ -16,7 +27,7 @@ const LIST_TTL_MS = 30 * 60 * 1000;
  */
 export class CatalogStore {
   private descriptions: DescriptionCache | undefined;
-  private readonly lists = new Map<string, { at: number; ref: string; skills: CatalogSkill[]; truncated: boolean }>();
+  private readonly listings = new Map<string, CachedListing>();
   private saveTimer: NodeJS.Timeout | undefined;
 
   constructor(private readonly service: SkillsService) {}
@@ -39,53 +50,60 @@ export class CatalogStore {
   private scheduleSave(): void {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
-      const data = Object.fromEntries([...(this.descriptions ?? new Map()).entries()].slice(-5000));
+      const newestEntries = [...(this.descriptions ?? new Map()).entries()].slice(-MAX_CACHED_DESCRIPTIONS);
       void fs
         .mkdir(path.dirname(this.file), { recursive: true })
-        .then(() => fs.writeFile(this.file, JSON.stringify(data)))
-        .catch((e) => log().warn(`catalog: could not save cache: ${(e as Error).message}`));
-    }, 1000);
+        .then(() => fs.writeFile(this.file, JSON.stringify(Object.fromEntries(newestEntries))))
+        .catch((error) => log().warn(`catalog: could not save cache: ${(error as Error).message}`));
+    }, SAVE_DELAY_MS);
   }
 
   async list(sourceId: string, force = false): Promise<{ skills: ViewCatalogSkill[]; truncated: boolean }> {
-    const src = FEATURED_SOURCES.find((s) => s.id === sourceId);
-    if (!src) throw new Error(`Unknown collection ${sourceId}`);
-    let hit = this.lists.get(sourceId);
-    if (!hit || force || Date.now() - hit.at > LIST_TTL_MS) {
-      const r = await listSource(await makeGitHubClient(this.service), src, await this.cache());
-      hit = { at: Date.now(), ref: r.ref, skills: r.skills, truncated: r.truncated };
-      this.lists.set(sourceId, hit);
+    const source = FEATURED_SOURCES.find((candidate) => candidate.id === sourceId);
+    if (!source) throw new Error(`Unknown collection ${sourceId}`);
+    let listing = this.listings.get(sourceId);
+    const isStale = !listing || Date.now() - listing.listedAt > LIST_TTL_MS;
+    if (!listing || force || isStale) {
+      const fresh = await listSource(await makeGitHubClient(this.service), source, await this.cache());
+      listing = { listedAt: Date.now(), ref: fresh.ref, skills: fresh.skills, truncated: fresh.truncated };
+      this.listings.set(sourceId, listing);
       this.scheduleSave();
-      log().info(`catalog: listed ${sourceId} (${r.skills.length} skills)`);
+      log().info(`catalog: listed ${sourceId} (${fresh.skills.length} skills)`);
     }
-    return { skills: hit.skills.map((s) => this.view(s)), truncated: hit.truncated };
+    return { skills: listing.skills.map((skill) => this.view(skill)), truncated: listing.truncated };
   }
 
   async search(query: string): Promise<ViewCatalogSkill[]> {
-    const r = await searchGitHub(await makeGitHubClient(this.service), query, await this.cache());
+    const found = await searchGitHub(await makeGitHubClient(this.service), query, await this.cache());
     this.scheduleSave();
-    log().info(`catalog: search "${query}" → ${r.length}`);
-    return r.map((s) => this.view(s));
+    log().info(`catalog: search "${query}" → ${found.length}`);
+    return found.map((skill) => this.view(skill));
   }
 
   /** Marks what is already on this machine: same GitHub origin (lock or gh skill), else just the same name. */
-  private view(s: CatalogSkill): ViewCatalogSkill {
-    const skills = this.service.current?.skills ?? [];
-    const same = skills.filter((k) => {
-      const t = this.service.tracked(k);
-      return t && t.owner.toLowerCase() === s.owner.toLowerCase() && t.repo.toLowerCase() === s.repo.toLowerCase() && t.subpath === s.dir;
+  private view(catalogSkill: CatalogSkill): ViewCatalogSkill {
+    const localSkills = this.service.current?.skills ?? [];
+    const fromSameSource = localSkills.filter((local) => {
+      const tracked = this.service.tracked(local);
+      if (!tracked) return false;
+      const sameRepo = tracked.owner.toLowerCase() === catalogSkill.owner.toLowerCase() && tracked.repo.toLowerCase() === catalogSkill.repo.toLowerCase();
+      return sameRepo && tracked.subpath === catalogSkill.dir;
     });
-    const sameName = same.length ? [] : skills.filter((k) => k.name === s.name);
+    const withSameName = fromSameSource.length ? [] : localSkills.filter((local) => local.name === catalogSkill.name);
+    const matches = fromSameSource.length ? fromSameSource : withSameName;
+    let installed: ViewCatalogSkill['installed'];
+    if (fromSameSource.length) installed = 'same-source';
+    else if (withSameName.length) installed = 'same-name';
     return {
-      sourceId: s.sourceId,
-      owner: s.owner,
-      repo: s.repo,
-      dir: s.dir,
-      name: s.name,
-      description: s.description,
-      url: s.url,
-      installed: same.length ? 'same-source' : sameName.length ? 'same-name' : undefined,
-      installedIn: [...new Set((same.length ? same : sameName).map((k) => this.service.location(k.locationId)?.label ?? pathKey(k.dir)))],
+      sourceId: catalogSkill.sourceId,
+      owner: catalogSkill.owner,
+      repo: catalogSkill.repo,
+      dir: catalogSkill.dir,
+      name: catalogSkill.name,
+      description: catalogSkill.description,
+      url: catalogSkill.url,
+      installed,
+      installedIn: [...new Set(matches.map((local) => this.service.location(local.locationId)?.label ?? pathKey(local.dir)))],
     };
   }
 }

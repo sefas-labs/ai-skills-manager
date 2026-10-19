@@ -5,15 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { FEATURED_SOURCES } from '../core/catalog';
 import { archiveSyncedBucket } from '../core/discovery';
 import { parseGitHubUrl } from '../core/github';
-import {
-  cleanupStaging,
-  commitInstall,
-  inspectRepository,
-  planInstall,
-  RepoInspection,
-  stageCandidates,
-  StagedSkill,
-} from '../core/installer';
+import { cleanupStaging, commitInstall, inspectRepository, planInstall, RepoInspection, stageCandidates, StagedSkill } from '../core/installer';
 import { worstSeverity } from '../core/inspector';
 import { parseFrontmatter } from '../core/frontmatter';
 import { isPathInside, safeJoin } from '../core/paths';
@@ -31,6 +23,118 @@ import { setSkillToggle, type ToggleRequest } from './toggles';
 import { copyOrMoveSkill } from './transfer';
 import { checkForUpdates, confirmAndUpdate } from './updates';
 
+type SetToggleMessage = Extract<WebviewToHost, { type: 'setToggle' }>;
+
+const MAX_SKILL_BODY_LENGTH = 30000;
+const MAX_LISTED_FILES = 300;
+const MAX_LISTING_DEPTH = 6;
+const MAX_CANDIDATE_FILES_SHOWN = 200;
+const SHORT_COMMIT_LENGTH = 7;
+const NONCE_BYTES = 16;
+const MAX_LOGGED_ERROR_LENGTH = 500;
+/** Shown after a symlink's name in the file list; stripped again when the user opens it. */
+const SYMLINK_MARKER = ' →';
+/** Opened in the OS file browser instead of as text. */
+const BINARY_FILE = /\.(png|jpe?g|gif|webp|pdf|zip|exe|dll|so|dylib|bin|woff2?|ttf)$/i;
+/** Only GitHub repository pages are opened in the browser. */
+const GITHUB_REPO_PAGE = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(\/|$)/;
+const MOVE_TO_BACKUP = 'Move to Backup';
+
+function toggleRequestFrom(message: SetToggleMessage): ToggleRequest {
+  if (message.agent === 'claude') return { agent: 'claude', value: message.value };
+  if (message.agent === 'codex') return { agent: 'codex', enabled: message.enabled };
+  return { agent: 'frontmatter', mode: message.mode };
+}
+
+/** SKILL.md first, then files, then sub-folders, each alphabetically. */
+function listingOrder(entry: { name: string; isDirectory(): boolean }): number {
+  if (entry.name === 'SKILL.md') return 0;
+  return entry.isDirectory() ? 2 : 1;
+}
+
+/** Relative paths of the files in a skill folder, bounded; symlinks are marked and not followed. */
+async function listSkillFiles(skillDir: string): Promise<{ files: string[]; truncated: boolean }> {
+  const files: string[] = [];
+  let truncated = false;
+  const walk = async (dir: string, relativeDir: string, depth: number) => {
+    if (depth > MAX_LISTING_DEPTH || files.length >= MAX_LISTED_FILES) {
+      truncated = truncated || files.length >= MAX_LISTED_FILES;
+      return;
+    }
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    entries.sort((first, second) => listingOrder(first) - listingOrder(second) || first.name.localeCompare(second.name));
+    for (const entry of entries) {
+      if (files.length >= MAX_LISTED_FILES) {
+        truncated = true;
+        return;
+      }
+      const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await walk(path.join(dir, entry.name), relativePath, depth + 1);
+      else if (entry.isSymbolicLink()) files.push(relativePath + SYMLINK_MARKER);
+      else files.push(relativePath);
+    }
+  };
+  await walk(skillDir, '', 0);
+  return { files, truncated };
+}
+
+function viewInspection(inspection: RepoInspection): ViewInspection {
+  return {
+    owner: inspection.owner,
+    repo: inspection.repo,
+    ref: inspection.ref,
+    commit: inspection.commit,
+    subpath: inspection.subpath,
+    url: inspection.url,
+    notes: inspection.notes,
+    candidates: inspection.candidates.map((candidate) => ({
+      id: candidate.id,
+      repoDir: candidate.repoDir,
+      installName: candidate.installName,
+      name: candidate.name,
+      description: candidate.description,
+      fileCount: candidate.files.length,
+      files: candidate.files.slice(0, MAX_CANDIDATE_FILES_SHOWN).map((file) => file.path),
+      skipped: candidate.skipped,
+      totalBytes: candidate.totalBytes,
+      issues: candidate.issues,
+      findings: candidate.findings,
+      skillMdPreview: candidate.skillMdPreview,
+      installable: candidate.installable,
+      blockReason: candidate.blockReason,
+    })),
+  };
+}
+
+/** Moves the claude.ai skills synced for another account to the backup folder, after a modal. */
+async function archiveOtherAccountSkills(service: SkillsService, bucket: string): Promise<void> {
+  const location = service.current?.locations.find((candidate) => candidate.skippedSyncedBuckets?.some((skipped) => skipped.bucket === bucket));
+  const skipped = location?.skippedSyncedBuckets?.find((candidate) => candidate.bucket === bucket);
+  if (!skipped) return;
+  const lastSynced = skipped.lastSynced ? new Date(skipped.lastSynced).toLocaleDateString() : 'on an unknown date';
+  const answer = await vscode.window.showWarningMessage(
+    `Move the claude.ai skills of another account to the backup folder?`,
+    {
+      modal: true,
+      detail: [
+        skipped.path,
+        '',
+        `${skipped.skills.length} skill(s), last synced ${lastSynced}: ${skipped.skills.join(', ')}.`,
+        '',
+        "Claude Code doesn't load them (they belong to an account you're not signed in with). If you sign in with that account again, Claude Code downloads them again.",
+      ].join('\n'),
+    },
+    MOVE_TO_BACKUP,
+  );
+  if (answer !== MOVE_TO_BACKUP) return;
+  const destination = await archiveSyncedBucket(service.current!.context.homeDir, bucket, service.backupDir);
+  log().info(`archive synced bucket ${bucket} → ${destination}`);
+  await service.refresh();
+  vscode.window.showInformationMessage('Moved the other account’s synced skills to the backup folder.', 'Show Backups').then((choice) => {
+    if (choice) vscode.commands.executeCommand('skillsManager.openBackups');
+  });
+}
+
 export class DashboardPanel implements vscode.Disposable {
   static current: DashboardPanel | undefined;
   private readonly disposables: vscode.Disposable[] = [];
@@ -38,6 +142,9 @@ export class DashboardPanel implements vscode.Disposable {
   private staged: StagedSkill[] = [];
   private ready = false;
   private pending: HostToWebview[] = [];
+
+  /** Last render error reported by the webview, if any. */
+  lastClientError: string | undefined;
 
   static show(context: vscode.ExtensionContext, service: SkillsService, focus?: Extract<HostToWebview, { type: 'focus' }>): DashboardPanel {
     if (DashboardPanel.current) {
@@ -63,25 +170,22 @@ export class DashboardPanel implements vscode.Disposable {
     panel.webview.html = this.html();
     this.disposables.push(
       panel.onDidDispose(() => this.dispose()),
-      panel.webview.onDidReceiveMessage((m: WebviewToHost) => this.onMessage(m)),
+      panel.webview.onDidReceiveMessage((message: WebviewToHost) => this.onMessage(message)),
       service.onDidChange(() => this.pushState()),
     );
   }
-
-  /** Last render error reported by the webview, if any. */
-  lastClientError: string | undefined;
 
   /** True once the webview script ran under the CSP and sent 'ready'. */
   get isReady(): boolean {
     return this.ready;
   }
 
-  private post(msg: HostToWebview): void {
+  private post(message: HostToWebview): void {
     if (!this.ready) {
-      this.pending.push(msg);
+      this.pending.push(message);
       return;
     }
-    void this.panel.webview.postMessage(msg);
+    void this.panel.webview.postMessage(message);
   }
 
   private pushState(): void {
@@ -89,214 +193,170 @@ export class DashboardPanel implements vscode.Disposable {
     if (state) this.post({ type: 'state', state });
   }
 
-  private async onMessage(m: WebviewToHost): Promise<void> {
+  private async onReady(): Promise<void> {
+    this.ready = true;
+    if (!this.service.current) await this.service.refresh();
+    await getGitHubToken(this.service);
+    this.pushState();
+    this.post({ type: 'catalogSources', sources: FEATURED_SOURCES.map(({ id, title, blurb }) => ({ id, title, blurb })) });
+    for (const queued of this.pending.splice(0)) void this.panel.webview.postMessage(queued);
+  }
+
+  private async onMessage(message: WebviewToHost): Promise<void> {
+    const service = this.service;
     try {
-      switch (m.type) {
-        case 'ready': {
-          this.ready = true;
-          if (!this.service.current) await this.service.refresh();
-          await getGitHubToken(this.service);
-          this.pushState();
-          this.post({ type: 'catalogSources', sources: FEATURED_SOURCES.map(({ id, title, blurb }) => ({ id, title, blurb })) });
-          for (const p of this.pending.splice(0)) void this.panel.webview.postMessage(p);
-          return;
-        }
+      switch (message.type) {
+        case 'ready':
+          return await this.onReady();
         case 'clientError':
-          this.lastClientError = String(m.message);
-          console.error('[skills-manager] dashboard render error:', String(m.message).slice(0, 500));
+          this.lastClientError = String(message.message);
+          console.error('[skills-manager] dashboard render error:', String(message.message).slice(0, MAX_LOGGED_ERROR_LENGTH));
           return;
         case 'reloadWindow':
           await vscode.commands.executeCommand('workbench.action.reloadWindow');
           return;
         case 'refresh':
-          await this.withBusy('refresh', () => this.service.refresh());
+          await this.withBusy('refresh', () => service.refresh());
           return;
         case 'getDetail':
-          return await this.sendDetail(m.skillId);
+          return await this.sendDetail(message.skillId);
         case 'openSkillFile':
-          if (m.rel) return await this.openRelative(m.skillId, m.rel);
-          return await openSkillFile(this.service, m.skillId);
+          if (message.rel) return await this.openSkillRelativeFile(message.skillId, message.rel);
+          return await openSkillFile(service, message.skillId);
         case 'reveal':
-          return await revealSkill(this.service, m.skillId);
+          return await revealSkill(service, message.skillId);
         case 'copyPath':
-          return await copySkillPath(this.service, m.skillId);
+          return await copySkillPath(service, message.skillId);
         case 'uninstall':
-          await confirmAndUninstall(this.service, m.skillId);
+          await confirmAndUninstall(service, message.skillId);
           return;
         case 'copyMove':
-          await copyOrMoveSkill(this.service, m.skillId);
+          await copyOrMoveSkill(service, message.skillId);
           return;
         case 'chooseCopy':
-          await this.withBusy('chooseCopy', () => chooseCopy(this.service, m.skillId));
+          await this.withBusy('chooseCopy', () => chooseCopy(service, message.skillId));
           return;
         case 'copyTo':
-          await copyOrMoveSkill(this.service, m.skillId, { targetId: m.locationId });
+          await copyOrMoveSkill(service, message.skillId, { targetId: message.locationId });
           return;
         case 'addToProject':
-          await this.withBusy('addToProject', () => copyOrMoveSkill(this.service, m.skillId, { toProject: true }));
+          await this.withBusy('addToProject', () => copyOrMoveSkill(service, message.skillId, { toProject: true }));
           return;
         case 'fix':
-          await this.withBusy('fix', () => fixSkill(this.service, m.skillId, m.fixId as FixId | undefined));
+          await this.withBusy('fix', () => fixSkill(service, message.skillId, message.fixId as FixId | undefined));
           return;
         case 'merge':
-          await this.withBusy('merge', () => handleMerge(this.service, m.suggestionId, m.action, m.skillId));
+          await this.withBusy('merge', () => handleMerge(service, message.suggestionId, message.action, message.skillId));
           return;
         case 'catalogList': {
-          const r = await this.withBusy(`catalog:${m.sourceId}`, () => this.service.catalog.list(m.sourceId, m.force));
-          this.post({ type: 'catalogSkills', sourceId: m.sourceId, ...r });
+          const listing = await this.withBusy(`catalog:${message.sourceId}`, () => service.catalog.list(message.sourceId, message.force));
+          this.post({ type: 'catalogSkills', sourceId: message.sourceId, ...listing });
           return;
         }
         case 'catalogSearch': {
-          const skills = await this.withBusy('catalogSearch', () => this.service.catalog.search(m.query));
-          this.post({ type: 'catalogResults', query: m.query, skills });
+          const skills = await this.withBusy('catalogSearch', () => service.catalog.search(message.query));
+          this.post({ type: 'catalogResults', query: message.query, skills });
           return;
         }
-        case 'setToggle': {
-          const req = m.agent === 'claude' ? { agent: m.agent, value: m.value } : m.agent === 'codex' ? { agent: m.agent, enabled: m.enabled } : { agent: m.agent, mode: m.mode };
-          await this.withBusy('toggle', () => setSkillToggle(this.service, m.skillId, req as ToggleRequest));
+        case 'setToggle':
+          await this.withBusy('toggle', () => setSkillToggle(service, message.skillId, toggleRequestFrom(message)));
           return;
-        }
         case 'openCustomization': {
           // Only files from the inventory, opened as text (never executed).
-          const item = this.service.customizations[Number(m.id)];
+          const item = service.customizations[Number(message.id)];
           if (item) await vscode.window.showTextDocument(vscode.Uri.file(item.path), { preview: true });
           return;
         }
         case 'newCustomization':
-          await this.withBusy('edit', () => newCustomization(this.service, m.kind));
+          await this.withBusy('edit', () => newCustomization(service, message.kind));
           return;
         case 'deleteCustomization':
-          await this.withBusy('edit', () => deleteCustomization(this.service, m.id));
+          await this.withBusy('edit', () => deleteCustomization(service, message.id));
           return;
         case 'mcpAdd':
-          await this.withBusy('edit', () => addMcp(this.service));
+          await this.withBusy('edit', () => addMcp(service));
           return;
         case 'mcpRemove':
-          await this.withBusy('edit', () => removeMcp(this.service, m.id, m.name));
+          await this.withBusy('edit', () => removeMcp(service, message.id, message.name));
           return;
         case 'mcpToggle':
-          await this.withBusy('edit', () => toggleMcp(this.service, m.id, m.name, m.enabled));
+          await this.withBusy('edit', () => toggleMcp(service, message.id, message.name, message.enabled));
           return;
-        case 'archiveSynced': {
-          const loc = this.service.current?.locations.find((l) => l.skippedSyncedBuckets?.some((b) => b.bucket === m.bucket));
-          const b = loc?.skippedSyncedBuckets?.find((x) => x.bucket === m.bucket);
-          if (!b) return;
-          const ok = await vscode.window.showWarningMessage(
-            `Move the claude.ai skills of another account to the backup folder?`,
-            {
-              modal: true,
-              detail: `${b.path}\n\n${b.skills.length} skill(s), last synced ${b.lastSynced ? new Date(b.lastSynced).toLocaleDateString() : 'on an unknown date'}: ${b.skills.join(', ')}.\n\nClaude Code doesn't load them (they belong to an account you're not signed in with). If you sign in with that account again, Claude Code downloads them again.`,
-            },
-            'Move to Backup',
-          );
-          if (ok !== 'Move to Backup') return;
-          const dest = await archiveSyncedBucket(this.service.current!.context.homeDir, m.bucket, this.service.backupDir);
-          log().info(`archive synced bucket ${m.bucket} → ${dest}`);
-          await this.service.refresh();
-          vscode.window.showInformationMessage('Moved the other account’s synced skills to the backup folder.', 'Show Backups').then((c) => {
-            if (c) vscode.commands.executeCommand('skillsManager.openBackups');
-          });
-          return;
-        }
+        case 'archiveSynced':
+          return await archiveOtherAccountSkills(service, message.bucket);
         case 'openUrl':
-          // Only GitHub pages, opened in the browser.
-          if (/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(\/|$)/.test(m.url)) await vscode.env.openExternal(vscode.Uri.parse(m.url));
+          if (GITHUB_REPO_PAGE.test(message.url)) await vscode.env.openExternal(vscode.Uri.parse(message.url));
           return;
         case 'checkUpdates':
-          await this.withBusy('checkUpdates', () => checkForUpdates(this.service, true));
+          await this.withBusy('checkUpdates', () => checkForUpdates(service, true));
           return;
         case 'update':
-          await this.withBusy('update', () => confirmAndUpdate(this.service, m.skillId));
+          await this.withBusy('update', () => confirmAndUpdate(service, message.skillId));
           return;
         case 'signIn':
-          await getGitHubToken(this.service, m.privateRepos ? 'private' : 'public');
+          await getGitHubToken(service, message.privateRepos ? 'private' : 'public');
           this.pushState();
           return;
         case 'openDocs': {
-          const p = this.service.current?.providers.find((x) => x.id === m.providerId);
-          if (p && /^https:\/\//.test(p.docsUrl)) await vscode.env.openExternal(vscode.Uri.parse(p.docsUrl));
+          const provider = service.current?.providers.find((candidate) => candidate.id === message.providerId);
+          if (provider?.docsUrl.startsWith('https://')) await vscode.env.openExternal(vscode.Uri.parse(provider.docsUrl));
           return;
         }
         case 'inspect':
-          return await this.inspect(m.url);
+          return await this.inspect(message.url);
         case 'stage':
-          return await this.stage(m.candidateIds);
+          return await this.stage(message.candidateIds);
         case 'install':
-          return await this.install(m.locationId);
+          return await this.install(message.locationId);
         case 'cancelInstall':
           await this.resetInstall();
           this.post({ type: 'installCancelled' });
           return;
         default:
           // A dashboard from a newer build than this host: say so instead of ignoring the click.
-          log().warn(`dashboard: unknown action ${(m as { type: string }).type}`);
+          log().warn(`dashboard: unknown action ${(message as { type: string }).type}`);
           this.post({ type: 'error', op: 'general', message: 'This action is not available in the running extension. Run "Developer: Reload Window" to finish updating.' });
       }
-    } catch (e) {
-      log().error(`dashboard ${m.type} failed`, e as Error);
-      this.post({ type: 'error', op: m.type, message: e instanceof UserError ? e.message : `Unexpected error: ${(e as Error).message}`, code: (e as UserError).code });
+    } catch (error) {
+      log().error(`dashboard ${message.type} failed`, error as Error);
+      const text = error instanceof UserError ? error.message : `Unexpected error: ${(error as Error).message}`;
+      this.post({ type: 'error', op: message.type, message: text, code: (error as UserError).code });
     }
   }
 
-  private async withBusy<T>(op: string, fn: () => Promise<T>): Promise<T> {
-    this.post({ type: 'busy', op, busy: true });
+  private async withBusy<T>(operation: string, task: () => Promise<T>): Promise<T> {
+    this.post({ type: 'busy', op: operation, busy: true });
     try {
-      return await fn();
+      return await task();
     } finally {
-      this.post({ type: 'busy', op, busy: false });
+      this.post({ type: 'busy', op: operation, busy: false });
     }
   }
 
   private async sendDetail(skillId: string): Promise<void> {
-    const s = this.service.skill(skillId);
-    if (!s) return;
-    let body = '';
-    try {
-      const raw = await fs.readFile(s.skillFile, 'utf8');
-      body = parseFrontmatter(raw).body.trim().slice(0, 30000);
-    } catch {
-      body = '';
-    }
-    const files: string[] = [];
-    let truncated = false;
-    const walk = async (dir: string, rel: string, depth: number) => {
-      if (depth > 6 || files.length >= 300) {
-        truncated = truncated || files.length >= 300;
-        return;
-      }
-      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-      // SKILL.md first, then files, then sub-folders.
-      const rank = (e: { name: string; isDirectory(): boolean }) => (e.name === 'SKILL.md' ? 0 : e.isDirectory() ? 2 : 1);
-      for (const e of entries.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))) {
-        if (files.length >= 300) {
-          truncated = true;
-          return;
-        }
-        const r = rel ? `${rel}/${e.name}` : e.name;
-        if (e.isDirectory()) await walk(path.join(dir, e.name), r, depth + 1);
-        else if (e.isSymbolicLink()) files.push(r + ' →');
-        else files.push(r);
-      }
-    };
-    await walk(s.realDir, '', 0);
-    this.post({ type: 'detail', detail: { id: s.id, body, files, truncated } });
+    const skill = this.service.skill(skillId);
+    if (!skill) return;
+    const skillMd = await fs.readFile(skill.skillFile, 'utf8').catch(() => '');
+    const body = parseFrontmatter(skillMd).body.trim().slice(0, MAX_SKILL_BODY_LENGTH);
+    const { files, truncated } = await listSkillFiles(skill.realDir);
+    this.post({ type: 'detail', detail: { id: skill.id, body, files, truncated } });
   }
 
-  private async openRelative(skillId: string, rel: string): Promise<void> {
-    const s = this.service.skill(skillId);
-    if (!s) return;
-    const target = safeJoin(s.realDir, rel.replace(/ →$/, ''));
-    const real = await fs.realpath(target).catch(() => target);
-    if (!isPathInside(real, s.realDir)) {
+  private async openSkillRelativeFile(skillId: string, relativePath: string): Promise<void> {
+    const skill = this.service.skill(skillId);
+    if (!skill) return;
+    const target = safeJoin(skill.realDir, relativePath.replace(new RegExp(`${SYMLINK_MARKER}$`), ''));
+    const realTarget = await fs.realpath(target).catch(() => target);
+    if (!isPathInside(realTarget, skill.realDir)) {
       vscode.window.showWarningMessage('That file is a link pointing outside the skill folder; opening it in the OS file browser instead.');
       await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(target));
       return;
     }
-    if (/\.(png|jpe?g|gif|webp|pdf|zip|exe|dll|so|dylib|bin|woff2?|ttf)$/i.test(rel)) {
-      await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(real));
+    if (BINARY_FILE.test(relativePath)) {
+      await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(realTarget));
       return;
     }
-    await vscode.window.showTextDocument(vscode.Uri.file(real), { preview: true });
+    await vscode.window.showTextDocument(vscode.Uri.file(realTarget), { preview: true });
   }
 
   // ---------- GitHub install flow ----------
@@ -310,149 +370,115 @@ export class DashboardPanel implements vscode.Disposable {
   private async inspect(url: string): Promise<void> {
     await this.resetInstall();
     const parsed = parseGitHubUrl(url);
-    const result = await this.withBusy('inspect', async () => {
-      const client = await makeGitHubClient(this.service);
-      return inspectRepository(client, parsed);
-    });
-    this.inspection = result;
+    const inspection = await this.withBusy('inspect', async () => inspectRepository(await makeGitHubClient(this.service), parsed));
+    this.inspection = inspection;
     this.pushState();
-    const view: ViewInspection = {
-      owner: result.owner,
-      repo: result.repo,
-      ref: result.ref,
-      commit: result.commit,
-      subpath: result.subpath,
-      url: result.url,
-      notes: result.notes,
-      candidates: result.candidates.map((c) => ({
-        id: c.id,
-        repoDir: c.repoDir,
-        installName: c.installName,
-        name: c.name,
-        description: c.description,
-        fileCount: c.files.length,
-        files: c.files.slice(0, 200).map((f) => f.path),
-        skipped: c.skipped,
-        totalBytes: c.totalBytes,
-        issues: c.issues,
-        findings: c.findings,
-        skillMdPreview: c.skillMdPreview,
-        installable: c.installable,
-        blockReason: c.blockReason,
-      })),
-    };
-    this.post({ type: 'inspection', inspection: view });
+    this.post({ type: 'inspection', inspection: viewInspection(inspection) });
   }
 
-  private async stage(ids: string[]): Promise<void> {
+  private async stage(candidateIds: string[]): Promise<void> {
     if (!this.inspection) throw new UserError('Analyze a repository first.');
     if (this.staged.length) await cleanupStaging(this.staged);
     this.staged = [];
     const inspection = this.inspection;
-    this.staged = await this.withBusy('stage', async () => {
-      const client = await makeGitHubClient(this.service);
-      return stageCandidates(client, inspection, ids, this.service.stagingDir);
-    });
+    this.staged = await this.withBusy('stage', async () => stageCandidates(await makeGitHubClient(this.service), inspection, candidateIds, this.service.stagingDir));
     this.post({
       type: 'staged',
-      staged: this.staged.map((s) => ({
-        candidateId: s.candidate.id,
-        installName: s.candidate.installName,
-        fileCount: s.fileCount,
-        bytes: s.bytes,
-        findings: s.findings,
+      staged: this.staged.map((stagedSkill) => ({
+        candidateId: stagedSkill.candidate.id,
+        installName: stagedSkill.candidate.installName,
+        fileCount: stagedSkill.fileCount,
+        bytes: stagedSkill.bytes,
+        findings: stagedSkill.findings,
       })),
     });
   }
 
+  /** Asks once more when the review found high-risk content; true to continue. */
+  private async acceptHighRiskFindings(): Promise<boolean> {
+    const allFindings = this.staged.flatMap((stagedSkill) => stagedSkill.findings);
+    if (worstSeverity(allFindings) !== 'high') return true;
+    const highRiskCount = allFindings.filter((finding) => finding.severity === 'high').length;
+    const answer = await vscode.window.showWarningMessage(
+      `${highRiskCount} high-risk finding(s) in the selected skills.`,
+      {
+        modal: true,
+        detail:
+          'Skills are instructions your AI agent will follow and may include scripts it can run. Review the highlighted findings in the dashboard before continuing. Only install skills from sources you trust.',
+      },
+      'I reviewed them, continue',
+    );
+    return !!answer;
+  }
+
   private async install(locationId: string): Promise<void> {
-    if (!this.inspection || this.staged.length === 0) throw new UserError('Review the selected skills first.');
-    const loc = this.service.location(locationId);
-    if (!loc) throw new UserError('Choose where to install.');
-    if (loc.scope === 'workspace' && !vscode.workspace.isTrusted) {
+    const inspection = this.inspection;
+    if (!inspection || this.staged.length === 0) throw new UserError('Review the selected skills first.');
+    const location = this.service.location(locationId);
+    if (!location) throw new UserError('Choose where to install.');
+    if (location.scope === 'workspace' && !vscode.workspace.isTrusted) {
       throw new UserError('This workspace is not trusted. Trust it to install skills into the workspace.');
     }
-    const plans = await planInstall(this.staged, loc);
-    const allFindings = this.staged.flatMap((s) => s.findings);
-    const worst = worstSeverity(allFindings);
-    const who = loc.readers.map((r) => this.service.providerName(r)).join(', ');
+    const plans = await planInstall(this.staged, location);
+    if (!(await this.acceptHighRiskFindings())) return;
 
-    if (worst === 'high') {
-      const n = allFindings.filter((f) => f.severity === 'high').length;
-      const ok = await vscode.window.showWarningMessage(
-        `${n} high-risk finding(s) in the selected skills.`,
-        {
-          modal: true,
-          detail:
-            'Skills are instructions your AI agent will follow and may include scripts it can run. Review the highlighted findings in the dashboard before continuing. Only install skills from sources you trust.',
-        },
-        'I reviewed them, continue',
-      );
-      if (!ok) return;
-    }
-
-    const conflicts = plans.filter((p) => p.exists);
-    const lines = plans.map(
-      (p) => `• ${p.staged.candidate.installName} — ${p.staged.fileCount} files${p.exists ? ' (replaces existing; a backup is kept)' : ''}`,
-    );
+    const replacesExisting = plans.some((plan) => plan.exists);
+    const planLines = plans.map((plan) => {
+      const replaceNote = plan.exists ? ' (replaces existing; a backup is kept)' : '';
+      return `• ${plan.staged.candidate.installName} — ${plan.staged.fileCount} files${replaceNote}`;
+    });
     const detail = [
-      `From: ${this.inspection.owner}/${this.inspection.repo} @ ${this.inspection.commit.slice(0, 7)} (${this.inspection.ref})`,
-      `Into: ${loc.path}`,
-      `Visible to: ${who}`,
+      `From: ${inspection.owner}/${inspection.repo} @ ${inspection.commit.slice(0, SHORT_COMMIT_LENGTH)} (${inspection.ref})`,
+      `Into: ${location.path}`,
+      `Visible to: ${this.service.agentNames(location.readers, '')}`,
       '',
-      ...lines,
+      ...planLines,
       '',
       'Nothing is executed. Files are written without execute permission.',
     ].join('\n');
-    const action = conflicts.length ? 'Replace and Install' : 'Install';
-    const choice = await vscode.window.showInformationMessage(
-      `Install ${plans.length} skill${plans.length > 1 ? 's' : ''} into ${loc.label}?`,
-      { modal: true, detail },
-      action,
-    );
+    const action = replacesExisting ? 'Replace and Install' : 'Install';
+    const plural = plans.length > 1 ? 's' : '';
+    const choice = await vscode.window.showInformationMessage(`Install ${plans.length} skill${plural} into ${location.label}?`, { modal: true, detail }, action);
     if (choice !== action) return;
 
     const results = await this.withBusy('install', () =>
-      commitInstall(plans, conflicts.length > 0, { lock: this.service.lock, backupRoot: this.service.backupDir, inspection: this.inspection! }),
+      commitInstall(plans, replacesExisting, { lock: this.service.lock, backupRoot: this.service.backupDir, inspection }),
     );
     await cleanupStaging(this.staged);
     this.staged = [];
     await this.service.refresh();
-    this.post({ type: 'installed', names: results.map((r) => r.name), locationLabel: loc.label });
-    const first = results[0];
-    vscode.window
-      .showInformationMessage(`Installed ${results.map((r) => r.name).join(', ')} into ${loc.label}.`, 'Open SKILL.md')
-      .then((c) => {
-        if (c && first) vscode.window.showTextDocument(vscode.Uri.file(path.join(first.targetDir, 'SKILL.md')));
-      });
+    const installedNames = results.map((result) => result.name);
+    this.post({ type: 'installed', names: installedNames, locationLabel: location.label });
+    const firstInstalled = results[0];
+    vscode.window.showInformationMessage(`Installed ${installedNames.join(', ')} into ${location.label}.`, 'Open SKILL.md').then((choice) => {
+      if (choice && firstInstalled) vscode.window.showTextDocument(vscode.Uri.file(path.join(firstInstalled.targetDir, 'SKILL.md')));
+    });
   }
 
   private html(): string {
-    const w = this.panel.webview;
-    const nonce = randomBytes(16).toString('base64');
-    const css = w.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'dashboard.css'));
-    const icons = w.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'codicons', 'codicon.css'));
-    const js = w.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview.js'));
-    const csp = [
+    const webview = this.panel.webview;
+    const nonce = randomBytes(NONCE_BYTES).toString('base64');
+    const resource = (...segments: string[]) => webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, ...segments));
+    const contentSecurityPolicy = [
       "default-src 'none'",
-      `style-src ${w.cspSource}`,
-      `img-src ${w.cspSource} data:`,
-      `font-src ${w.cspSource}`,
+      `style-src ${webview.cspSource}`,
+      `img-src ${webview.cspSource} data:`,
+      `font-src ${webview.cspSource}`,
       `script-src 'nonce-${nonce}'`,
     ].join('; ');
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="${csp}">
+<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="stylesheet" href="${icons}">
-<link rel="stylesheet" href="${css}">
+<link rel="stylesheet" href="${resource('dist', 'codicons', 'codicon.css')}">
+<link rel="stylesheet" href="${resource('media', 'dashboard.css')}">
 <title>AI Skills</title>
 </head>
 <body>
 <div id="app" role="application" aria-busy="true"></div>
-<script nonce="${nonce}" src="${js}"></script>
+<script nonce="${nonce}" src="${resource('dist', 'webview.js')}"></script>
 </body>
 </html>`;
   }
@@ -460,7 +486,7 @@ export class DashboardPanel implements vscode.Disposable {
   dispose(): void {
     DashboardPanel.current = undefined;
     void cleanupStaging(this.staged);
-    for (const d of this.disposables) d.dispose();
+    for (const disposable of this.disposables) disposable.dispose();
     this.panel.dispose();
   }
 }
