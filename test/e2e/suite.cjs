@@ -87,6 +87,13 @@ exports.run = async function run() {
     })();
     check('tree offers Fix on it', brokenItem && /\+fix/.test(brokenItem.contextValue), brokenItem && brokenItem.contextValue);
 
+    try {
+      const cat = await api.service.catalog.list('anthropics/skills');
+      check('catalog lists a featured collection (real GitHub)', cat.skills.length > 5 && cat.skills.every((k) => k.url.startsWith('https://github.com/anthropics/skills/tree/')), cat.skills.length);
+    } catch (e) {
+      check('catalog lists a featured collection (real GitHub)', false, String(e.message));
+    }
+
     const ghAuth = vscode.extensions.getExtension('vscode.github-authentication');
     report.githubAuthExtension = !!ghAuth;
     try {

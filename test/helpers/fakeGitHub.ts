@@ -30,6 +30,22 @@ export class FakeGitHub {
 
     if (u.hostname === 'api.github.com') {
       const parts = u.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+      if (parts[0] === 'search' && parts[1] === 'code') {
+        if (auth !== `Bearer ${this.token}` || !this.token) return this.res(401, { message: 'Requires authentication' });
+        const terms = (u.searchParams.get('q') ?? '').split(/\s+/).filter((t) => t && !t.startsWith('filename:')).map((t) => t.toLowerCase());
+        const items: unknown[] = [];
+        for (const [full, repo] of Object.entries(this.repos)) {
+          if (repo.private) continue;
+          const files = repo.commits[repo.refs[repo.defaultBranch]];
+          for (const [p, spec] of Object.entries(files ?? {})) {
+            if (!/(^|\/)SKILL\.md$/.test(p) || typeof spec !== 'string') continue;
+            if (terms.every((t) => spec.toLowerCase().includes(t) || p.toLowerCase().includes(t))) {
+              items.push({ path: p, sha: blobSha(Buffer.from(spec)), repository: { full_name: full } });
+            }
+          }
+        }
+        return this.res(200, { total_count: items.length, items });
+      }
       if (parts[0] !== 'repos') return this.res(404, {});
       const key = `${parts[1]}/${parts[2]}`;
       const repo = this.repos[key];
@@ -60,7 +76,7 @@ export class FakeGitHub {
     if (u.hostname === 'raw.githubusercontent.com') {
       const parts = u.pathname.split('/').filter(Boolean).map(decodeURIComponent);
       const repo = this.repos[`${parts[0]}/${parts[1]}`];
-      const files = repo?.commits[parts[2]];
+      const files = repo?.commits[parts[2] === 'HEAD' ? repo.refs[repo.defaultBranch] : (repo.refs[parts[2]] ?? parts[2])];
       const spec = files?.[parts.slice(3).join('/')];
       if (spec === undefined || (typeof spec === 'object' && !(spec instanceof Uint8Array) && !('content' in spec))) return this.res(404, 'not found');
       const body = typeof spec === 'string' ? Buffer.from(spec) : spec instanceof Uint8Array ? Buffer.from(spec) : Buffer.from(spec.content);

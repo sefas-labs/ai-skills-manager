@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { detectAgents, hostAgentFor, type AgentDetection } from '../core/agents';
 import { discover, DiscoverOptions, readClaudeSyncBucket } from '../core/discovery';
 import { fixesFor } from '../core/fixes';
+import { CatalogStore } from './catalog';
 import { mergeSuggestions, type MergeSuggestion } from '../core/merge';
 import { LockStore } from '../core/lockfile';
 import { BUILTIN_PROVIDERS } from '../core/providers';
@@ -29,6 +30,7 @@ export class SkillsService implements vscode.Disposable {
   private updates: Record<string, UpdateCheck>;
   updatesCheckedAt: string | undefined;
   agents: Record<string, AgentDetection> = {};
+  readonly catalog = new CatalogStore(this);
   merges: MergeSuggestion[] = [];
   readonly hostAgent = hostAgentFor(vscode.env.appName);
 

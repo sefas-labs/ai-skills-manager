@@ -75,6 +75,15 @@ Bugs corregidos:
   - Overview con un bloque de salud (anillo *OK/total*, agentes detectados, editor actual) y una lista **To do** de lo accionable, cada cosa con su botón. Las carpetas vacías de la matriz se pliegan, las tarjetas de agente son compactas (*How to disable* desplegable) y Merge suggestions es un desplegable.
   - Esqueletos de carga. En pantallas anchas se abre el primer skill automáticamente.
   - Puntos de corte para paneles estrechos (980, 820, 640 y 460 px) y bordes reforzados en alto contraste.
+- **Catálogo de skills** (Install → *Browse catalog*):
+  - **Colecciones destacadas**, verificadas el 19-oct-2026: Anthropic, OpenAI, Awesome Copilot, Vercel, Microsoft, Hugging Face y Superpowers.
+  - Cada colección se lista al abrirla con 3 llamadas a la API más la descarga de los SKILL.md desde raw. Las descripciones se cachean en disco por blob SHA, así que volver a listar solo cuesta esas 3 llamadas.
+  - **Search GitHub** busca en todos los repos públicos con la Code Search API, como `gh skill search`, y requiere sesión. Ordena primero las coincidencias en el nombre.
+  - Marca lo que ya tienes instalado (mismo origen o mismo nombre).
+  - *Install…* pasa la URL al flujo normal: análisis, staging, revisión de seguridad y confirmación.
+- Tests del webview con jsdom en `npm run test:smoke`: todas las pestañas, acciones principales, host antiguo, scroll y catálogo.
+- El webview se dividió en módulos (`store`, `dom`, `agents`, `skills`, `overview`, `map`, `install`, `catalog`, `main`).
+- CI en GitHub Actions: typecheck, tests y smoke en Linux y macOS, más el VSIX como artefacto.
 - `npm run test:e2e`: ejecuta la extensión dentro de VS Code o Cursor reales, con un perfil temporal y un proxy local.
 
 ## 0.1.0 — 2026-10-18

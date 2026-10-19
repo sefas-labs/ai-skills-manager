@@ -389,3 +389,27 @@ details.merges[open] > summary { margin-bottom: 8px; }
   .cards { grid-template-columns: 1fr; }
   .hero-score { flex-direction: column; align-items: flex-start; }
 }
+
+/* ===================== Install: catalog ===================== */
+.install-head { margin-bottom: 12px; }
+.seg .codicon { margin-right: 2px; }
+.cat-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.cat-toolbar .search { flex: 1; min-width: 220px; }
+.cat-sources { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.seg-chip { font: inherit; font-size: 0.92em; color: inherit; background: transparent; border: 1px solid var(--border); border-radius: 14px; padding: 3px 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.seg-chip:hover { background: var(--vscode-list-hoverBackground); }
+.seg-chip.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; }
+.seg-chip.active .count { background: color-mix(in srgb, var(--vscode-button-foreground) 25%, transparent); color: inherit; }
+.cat-blurb { margin: 2px 0 12px; }
+.cat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.cat-card { display: flex; flex-direction: column; gap: 4px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; min-height: 140px; }
+.cat-card:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+.cat-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cat-name { font-size: 1.02em; }
+.cat-src { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cat-desc { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin: 2px 0 6px; font-size: 0.92em; flex: 1; }
+.cat-actions { display: flex; gap: 10px; align-items: center; }
+.cat-actions .btn.link { display: inline-flex; align-items: center; gap: 4px; }
+.chip.ok-chip { background: color-mix(in srgb, var(--on) 22%, transparent); color: var(--vscode-foreground); }
+.cat-note { margin-top: 14px; }
+@media (max-width: 640px) { .cat-grid { grid-template-columns: 1fr; } }

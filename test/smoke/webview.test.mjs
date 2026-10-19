@@ -149,3 +149,26 @@ test('selecting a skill keeps the list scroll position', () => {
   [...doc.querySelectorAll('.list > .row')].at(-1).click();
   assert.equal(doc.querySelector('.list').scrollTop, 300);
 });
+
+test('install → browse catalog: lists a collection, filters, and Install hands the URL to the review flow', () => {
+  const { doc, sent, post, click } = mount({ tab: 'install' });
+  post({ type: 'state', state: fixture() });
+  post({ type: 'catalogSources', sources: [{ id: 'acme/skills', title: 'Acme', blurb: 'Acme skills.' }, { id: 'other/repo', title: 'Other', blurb: '' }] });
+  assert.deepEqual(sent.filter((m) => m.type === 'catalogList'), [{ type: 'catalogList', sourceId: 'acme/skills', force: false }], 'first collection requested once');
+  const sk = (name, extra = {}) => ({ sourceId: 'acme/skills', owner: 'acme', repo: 'skills', dir: `skills/${name}`, name, description: `${name} helper`, url: `https://github.com/acme/skills/tree/main/skills/${name}`, installedIn: [], ...extra });
+  post({ type: 'catalogSkills', sourceId: 'acme/skills', truncated: false, skills: [sk('pdf', { installed: 'same-source', installedIn: ['~/.agents/skills'] }), sk('deploy')] });
+  assert.equal(doc.querySelectorAll('.cat-card').length, 2);
+  assert.match(doc.querySelector('.cat-card').textContent, /pdfinstalled/);
+  const q = doc.getElementById('catalog-q');
+  q.value = 'deploy';
+  q.dispatchEvent(new doc.defaultView.Event('input'));
+  assert.equal(doc.querySelectorAll('.cat-card').length, 1);
+  click('Install…', doc.querySelector('.cat-card'));
+  assert.deepEqual(sent.at(-1), { type: 'inspect', url: 'https://github.com/acme/skills/tree/main/skills/deploy' });
+  assert.ok(doc.getElementById('url'), 'switched to the URL flow');
+  // Not signed in: searching all of GitHub asks for a sign-in instead.
+  click('From a URL');
+  click('Browse catalog');
+  click('Sign in to search GitHub');
+  assert.equal(sent.at(-1).type, 'signIn');
+});

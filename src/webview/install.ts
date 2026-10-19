@@ -3,6 +3,7 @@
 import type { Finding } from '../core/inspector';
 import type { ResolvedLocation } from '../core/types';
 import type { ViewCandidate, ViewInspection, ViewStaged } from '../shared/protocol';
+import { catalogView } from './catalog';
 import { render } from './main';
 import { busy, errors, install, persisted, save, send, ui } from './store';
 import { button, chip, h, icon, sevIcon } from './dom';
@@ -45,6 +46,16 @@ export function defaultTarget(): string {
 }
 
 export function installView(): Node {
+  // An install in progress always shows the URL flow; otherwise browse by default.
+  const mode = install.phase !== 'idle' ? 'url' : (persisted.installMode ?? 'browse');
+  const seg = (m: 'browse' | 'url', label: string, ic: string) =>
+    h('button', { class: `seg ${mode === m ? 'active' : ''}`, type: 'button', 'aria-pressed': mode === m ? 'true' : 'false', onClick: () => ((persisted.installMode = m), save(), render()) }, icon(ic), ` ${label}`);
+  const head = h('div', { class: 'install-head' }, h('div', { class: 'segmented', role: 'group', 'aria-label': 'Install from' }, seg('browse', 'Browse catalog', 'library'), seg('url', 'From a URL', 'link')));
+  if (mode === 'browse') return h('div', { class: 'install' }, head, catalogView());
+  return h('div', { class: 'install' }, head, urlFlow());
+}
+
+function urlFlow(): Node {
   const s = ui.state!;
   const inspecting = busy.has('inspect');
   const input = h('input', {
@@ -102,6 +113,7 @@ export function installView(): Node {
 
 export function analyze() {
   if (!persisted.url.trim()) return;
+  persisted.installMode = 'url';
   errors['inspect'] = undefined;
   install.phase = 'idle';
   install.inspection = null;

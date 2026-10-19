@@ -213,6 +213,25 @@ export class GitHubClient {
     return { entries: r.body.tree ?? [], truncated: !!r.body.truncated };
   }
 
+  /**
+   * GitHub code search for SKILL.md files (what `gh skill search` uses).
+   * GitHub only allows code search with a signed-in user.
+   */
+  async searchSkillFiles(query: string, perPage = 30): Promise<Array<{ owner: string; repo: string; path: string; sha: string }>> {
+    if (!this.authenticated) throw new UserError('Sign in to GitHub to search all of GitHub (GitHub requires it for code search).', 'auth-required');
+    const q = `${query.replace(/[^\p{L}\p{N} _.-]/gu, ' ').trim()} filename:SKILL.md`;
+    const r = await this.getJson<{ items: Array<{ path: string; sha: string; repository: { full_name: string } }> }>(
+      `/search/code?q=${encodeURIComponent(q)}&per_page=${perPage}`,
+    );
+    if (!r.body) throw new UserError(`GitHub search failed (HTTP ${r.status}).`, 'http');
+    return r.body.items
+      .filter((i) => /(^|\/)SKILL\.md$/.test(i.path))
+      .map((i) => {
+        const [owner, repo] = i.repository.full_name.split('/');
+        return { owner, repo, path: i.path, sha: i.sha };
+      });
+  }
+
   /** Downloads one file at an exact commit. Enforces a byte limit. */
   async file(owner: string, repo: string, commit: string, filePath: string, maxBytes: number): Promise<Uint8Array> {
     const url = `${this.raw}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(commit)}/${filePath

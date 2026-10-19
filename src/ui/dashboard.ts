@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { FEATURED_SOURCES } from '../core/catalog';
 import { parseGitHubUrl } from '../core/github';
 import {
   cleanupStaging,
@@ -93,6 +94,7 @@ export class DashboardPanel implements vscode.Disposable {
           if (!this.service.current) await this.service.refresh();
           await getGitHubToken(this.service);
           this.pushState();
+          this.post({ type: 'catalogSources', sources: FEATURED_SOURCES.map(({ id, title, blurb }) => ({ id, title, blurb })) });
           for (const p of this.pending.splice(0)) void this.panel.webview.postMessage(p);
           return;
         }
@@ -135,6 +137,20 @@ export class DashboardPanel implements vscode.Disposable {
           return;
         case 'merge':
           await this.withBusy('merge', () => handleMerge(this.service, m.suggestionId, m.action, m.skillId));
+          return;
+        case 'catalogList': {
+          const r = await this.withBusy(`catalog:${m.sourceId}`, () => this.service.catalog.list(m.sourceId, m.force));
+          this.post({ type: 'catalogSkills', sourceId: m.sourceId, ...r });
+          return;
+        }
+        case 'catalogSearch': {
+          const skills = await this.withBusy('catalogSearch', () => this.service.catalog.search(m.query));
+          this.post({ type: 'catalogResults', query: m.query, skills });
+          return;
+        }
+        case 'openUrl':
+          // Only GitHub pages, opened in the browser.
+          if (/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(\/|$)/.test(m.url)) await vscode.env.openExternal(vscode.Uri.parse(m.url));
           return;
         case 'checkUpdates':
           await this.withBusy('checkUpdates', () => checkForUpdates(this.service, true));

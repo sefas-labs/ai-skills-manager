@@ -1,7 +1,7 @@
 /* Dashboard webview entry point: rendering shell and host messages. Vanilla
  * TypeScript + DOM, no framework: values from the host go in via textContent. */
 import type { HostToWebview } from '../shared/protocol';
-import { INSTALL_OPS, type SkillsTab, type Tab, busy, errors, install, persisted, save, send, ui } from './store';
+import { INSTALL_OPS, type SkillsTab, type Tab, busy, catalog, errors, install, persisted, save, send, ui } from './store';
 import { button, h, icon, skeleton } from './dom';
 import { inTab, skillsView, tabOf } from './skills';
 import { analyze, installView } from './install';
@@ -151,7 +151,10 @@ window.addEventListener('message', (ev: MessageEvent<HostToWebview>) => {
         persisted.q = '';
         persisted.provider = persisted.status = 'all';
       }
-      if (m.url) persisted.url = m.url;
+      if (m.url) {
+        persisted.url = m.url;
+        persisted.installMode = 'url';
+      }
       save();
       if (m.autoInspect && m.url) {
         render();
@@ -161,6 +164,15 @@ window.addEventListener('message', (ev: MessageEvent<HostToWebview>) => {
       break;
     case 'detail':
       ui.detail = m.detail;
+      break;
+    case 'catalogSources':
+      catalog.sources = m.sources;
+      break;
+    case 'catalogSkills':
+      catalog.bySource.set(m.sourceId, { skills: m.skills, truncated: m.truncated });
+      break;
+    case 'catalogResults':
+      catalog.results = { query: m.query, skills: m.skills };
       break;
     case 'inspection':
       install.inspection = m.inspection;

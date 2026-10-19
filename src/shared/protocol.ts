@@ -38,6 +38,25 @@ export interface ViewSkill {
   skillMdLines: number;
 }
 
+export interface ViewCatalogSource {
+  id: string;
+  title: string;
+  blurb: string;
+}
+
+export interface ViewCatalogSkill {
+  sourceId: string;
+  owner: string;
+  repo: string;
+  dir: string;
+  name: string;
+  description?: string;
+  url: string;
+  /** Already on this machine: from the same GitHub folder, or only a skill with the same name. */
+  installed?: 'same-source' | 'same-name';
+  installedIn: string[];
+}
+
 export interface ViewMerge {
   id: string;
   name: string;
@@ -131,6 +150,9 @@ export type HostToWebview =
   | { type: 'installed'; names: string[]; locationLabel: string }
   | { type: 'installCancelled' }
   | { type: 'busy'; op: string; busy: boolean }
+  | { type: 'catalogSources'; sources: ViewCatalogSource[] }
+  | { type: 'catalogSkills'; sourceId: string; skills: ViewCatalogSkill[]; truncated: boolean }
+  | { type: 'catalogResults'; query: string; skills: ViewCatalogSkill[] }
   | { type: 'error'; op: string; message: string; code?: string };
 
 export type WebviewToHost =
@@ -148,6 +170,9 @@ export type WebviewToHost =
   | { type: 'copyTo'; skillId: string; locationId: string }
   | { type: 'chooseCopy'; skillId: string }
   | { type: 'checkUpdates' }
+  | { type: 'catalogList'; sourceId: string; force?: boolean }
+  | { type: 'catalogSearch'; query: string }
+  | { type: 'openUrl'; url: string }
   | { type: 'merge'; suggestionId: string; action: 'apply' | 'compare' | 'unify'; skillId?: string }
   | { type: 'fix'; skillId: string; fixId?: string }
   | { type: 'update'; skillId: string }

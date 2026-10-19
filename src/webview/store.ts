@@ -1,6 +1,6 @@
 /* Dashboard webview — store. Vanilla TypeScript + DOM, no framework: every value from
  * the host is inserted with textContent, never innerHTML. */
-import type { ViewInspection, ViewSkillDetail, ViewStaged, ViewState, WebviewToHost } from '../shared/protocol';
+import type { ViewCatalogSkill, ViewCatalogSource, ViewInspection, ViewSkillDetail, ViewStaged, ViewState, WebviewToHost } from '../shared/protocol';
 
 declare function acquireVsCodeApi(): { postMessage(m: unknown): void; getState(): unknown; setState(s: unknown): void };
 
@@ -30,6 +30,9 @@ export interface Persisted {
   showAllAgents?: boolean;
   mapScope?: 'project' | 'global';
   showEmptyFolders?: boolean;
+  installMode?: 'browse' | 'url';
+  catalogSource?: string;
+  catalogQ?: string;
 }
 
 export const persisted: Persisted = { tab: 'overview', q: '', provider: 'all', status: 'all', url: '', ...((api.getState() as Partial<Persisted>) ?? {}) };
@@ -54,5 +57,12 @@ export const save = () => api.setState(persisted);
 
 export const send = (m: WebviewToHost) => api.postMessage(m);
 
-export const INSTALL_OPS = new Set(['inspect', 'stage', 'install']);
+export const INSTALL_OPS = new Set(['inspect', 'stage', 'install', 'catalogList', 'catalogSearch']);
+
+/** Catalog data received from the host (Install → Browse). */
+export const catalog = {
+  sources: [] as ViewCatalogSource[],
+  bySource: new Map<string, { skills: ViewCatalogSkill[]; truncated: boolean }>(),
+  results: null as { query: string; skills: ViewCatalogSkill[] } | null,
+};
 

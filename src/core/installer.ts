@@ -88,6 +88,19 @@ export async function inspectRepository(
   return inspectResolved(client, { owner: parsed.owner, repo: parsed.repo, ref, commit, rootTreeSha, subpath }, limits);
 }
 
+/**
+ * Repo-relative folders that are skills: they contain a SKILL.md (exact case)
+ * and aren't inside another skill or a dependency/VCS folder. '' = repo root.
+ */
+export function findSkillDirs(entries: TreeEntry[]): string[] {
+  const dirs = entries
+    .filter((e) => e.type === 'blob' && !IGNORED_DIRS.test(e.path) && (e.path === 'SKILL.md' || e.path.endsWith('/SKILL.md')))
+    .map((e) => (e.path === 'SKILL.md' ? '' : e.path.slice(0, -'/SKILL.md'.length)))
+    .sort((a, b) => a.length - b.length || a.localeCompare(b));
+  // Keep only outermost skill folders (a nested SKILL.md belongs to its parent skill's files).
+  return dirs.filter((d, i) => !dirs.slice(0, i).some((p) => p === '' || d.startsWith(p + '/')));
+}
+
 export interface ResolvedTarget {
   owner: string;
   repo: string;
@@ -113,12 +126,7 @@ export async function inspectResolved(client: GitHubClient, target: ResolvedTarg
     throw new UserError(`Path "${subpath}" does not exist at ${ref}.`);
   }
 
-  let skillDirs = inScope
-    .filter((e) => e.type === 'blob' && (e.path === 'SKILL.md' || e.path.endsWith('/SKILL.md')))
-    .map((e) => (e.path === 'SKILL.md' ? '' : e.path.slice(0, -'/SKILL.md'.length)));
-  // Keep only outermost skill folders (a nested SKILL.md belongs to its parent skill's files).
-  skillDirs.sort((a, b) => a.length - b.length);
-  skillDirs = skillDirs.filter((d, i) => !skillDirs.slice(0, i).some((p) => p === '' || d.startsWith(p + '/')));
+  let skillDirs = findSkillDirs(inScope);
 
   if (skillDirs.length === 0) {
     const hints: string[] = [];
