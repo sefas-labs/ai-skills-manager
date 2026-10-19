@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { discover } from '../../src/core/discovery';
+import { archiveSyncedBucket, discover, readClaudeSyncBucket } from '../../src/core/discovery';
 import { BUILTIN_PROVIDERS } from '../../src/core/providers';
 import type { DiscoveryContext } from '../../src/core/types';
 import { skillMd, tempDir, writeSkill } from '../helpers/fsFixture';
@@ -102,7 +102,13 @@ test('extra locations from settings and admin location on non-Windows only', asy
   assert.deepEqual(r.skills.find((s) => s.name === 'mine')!.visibleTo, ['windsurf']);
   assert.ok(r.locations.some((l) => l.scope === 'admin'));
   const win = await discover({ ...ctx, platform: 'win32', homeDir: home }, BUILTIN_PROVIDERS);
-  assert.ok(!win.locations.some((l) => l.scope === 'admin'));
+  // Simulated win32 on a POSIX host: path.resolve keeps the Windows path as a suffix.
+  const winAdmin = win.locations.filter((l) => l.scope === 'admin');
+  assert.equal(winAdmin.length, 1, 'Windows: only Claude Code enterprise skills, no /etc/codex');
+  assert.ok(winAdmin[0].path.endsWith('C:\\Program Files\\ClaudeCode\\.claude\\skills'));
+  assert.deepEqual(winAdmin[0].readers, ['claude-code']);
+  const mac = await discover({ ...ctx, platform: 'darwin' }, BUILTIN_PROVIDERS);
+  assert.ok(mac.locations.some((l) => l.path === '/Library/Application Support/ClaudeCode/.claude/skills' && l.readOnly));
 });
 
 test('claude.ai synced skills one level below a per-account bucket are found (real layout)', async () => {
@@ -120,4 +126,83 @@ test('claude.ai synced skills one level below a per-account bucket are found (re
   // Same name in two synced buckets is not a user-fixable conflict.
   assert.ok(docs.every((s) => !s.issues.some((i) => i.code.startsWith('duplicate:'))));
   assert.ok(docs.every((s) => s.issues.some((i) => i.code === 'synced-copies')));
+});
+
+test('synced buckets of other claude.ai accounts are skipped when the signed-in account is known', async () => {
+  const { home, ctx } = await setup();
+  const synced = path.join(home, '.claude/skills/synced');
+  const active = '6ea04121-314f-4adf-8015-7c6afac3adcb_0eee56d7-2202-47a5-a7d2-bf9d59dca953';
+  const other = '80e671de-fcd2-4afc-82c7-e7d6937d29a4_ec9373c7-5518-4ee0-a53b-a502be0c969d';
+  await writeSkill(path.join(synced, active), 'docs');
+  await writeSkill(path.join(synced, other), 'docs');
+  await writeSkill(path.join(synced, other), 'old-only');
+  await fs.writeFile(
+    path.join(home, '.claude.json'),
+    JSON.stringify({ oauthAccount: { organizationUuid: '6ea04121-314f-4adf-8015-7c6afac3adcb', accountUuid: '0eee56d7-2202-47a5-a7d2-bf9d59dca953', emailAddress: 'x@y' }, other: 'ignored' }),
+  );
+  assert.equal(await readClaudeSyncBucket(home), active);
+
+  const r = await discover({ ...ctx, claudeSyncBucket: active }, BUILTIN_PROVIDERS);
+  const names = r.skills.filter((s) => s.managed).map((s) => s.name);
+  assert.deepEqual(names, ['docs']);
+  assert.ok(!r.skills[0].issues.some((i) => i.code === 'synced-copies'));
+  const loc = r.locations.find((l) => l.path === path.join(home, '.claude/skills'))!;
+  assert.equal(loc.skippedSynced, 2);
+  assert.deepEqual(loc.skippedSyncedBuckets?.map((b) => [b.bucket, b.skills]), [[other, ['docs', 'old-only']]]);
+
+  // Unknown account (no ~/.claude.json or not signed in): show everything, as before.
+  const all = await discover(ctx, BUILTIN_PROVIDERS);
+  assert.equal(all.skills.filter((s) => s.managed).length, 3);
+  await fs.writeFile(path.join(home, '.claude.json'), '{"oauthAccount":{"organizationUuid":"../../etc","accountUuid":"x"}}');
+  assert.equal(await readClaudeSyncBucket(home), undefined);
+});
+
+test('identical copies in two folders are informational, different ones a warning', async () => {
+  const { home, ws, ctx } = await setup();
+  await writeSkill(path.join(home, '.claude/skills'), 'same', skillMd('same', 'Same content.'));
+  await writeSkill(path.join(ws, '.agents/skills'), 'same', skillMd('same', 'Same content.'));
+  await writeSkill(path.join(home, '.claude/skills'), 'diff', skillMd('diff', 'Version A.'));
+  await writeSkill(path.join(ws, '.agents/skills'), 'diff', skillMd('diff', 'Version B.'));
+  const r = await discover(ctx, BUILTIN_PROVIDERS);
+  const codes = (n: string) => new Set(r.skills.filter((s) => s.name === n).flatMap((s) => s.issues.map((i) => i.code)));
+  assert.ok(codes('same').has('identical-copies'));
+  assert.ok(![...codes('same')].some((c) => c.startsWith('duplicate:')));
+  assert.ok(codes('diff').has('duplicate:cursor'));
+  const sameIds = r.skills.filter((s) => s.name === 'same').map((s) => s.contentId);
+  assert.ok(sameIds[0] && sameIds[0] === sameIds[1]);
+  assert.deepEqual(r.providers.find((p) => p.id === 'cursor')!.duplicateNames, ['diff']);
+});
+
+test('Cursor walks category folders; other readers of the same root do not', async () => {
+  const { home, ctx } = await setup();
+  await writeSkill(path.join(home, '.agents/skills/shipping'), 'deploy');
+  await writeSkill(path.join(home, '.agents/skills/workflow/deep'), 'triage');
+  await fs.mkdir(path.join(home, '.agents/skills/empty-group/nothing'), { recursive: true });
+  const r = await discover(ctx, BUILTIN_PROVIDERS);
+  const deploy = r.skills.find((s) => s.name === 'deploy')!;
+  assert.deepEqual(deploy.visibleTo, ['cursor']);
+  assert.equal(deploy.group, 'shipping');
+  const issue = deploy.issues.find((i) => i.code === 'in-category-folder')!;
+  assert.equal(issue.severity, 'warning');
+  assert.match(issue.message, /only Cursor finds it; Codex, GitHub Copilot only read skills directly/);
+  assert.equal(r.skills.find((s) => s.name === 'triage')!.group, 'workflow/deep');
+  const loc = r.locations.find((l) => l.path === path.join(home, '.agents/skills'))!;
+  assert.deepEqual(loc.ignoredEntries, ['empty-group/']);
+});
+
+test('archiving the other account’s synced folder: refuses the active one, moves the leftover', async () => {
+  const { root, home } = await setup();
+  const active = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+  const other = 'cccccccc-cccc-cccc-cccc-cccccccccccc_dddddddd-dddd-dddd-dddd-dddddddddddd';
+  await writeSkill(path.join(home, '.claude/skills/synced', active), 'docs');
+  await writeSkill(path.join(home, '.claude/skills/synced', other), 'docs');
+  const backups = path.join(root, 'backups');
+  await assert.rejects(archiveSyncedBucket(home, other, backups), /signed in/);
+  await fs.writeFile(path.join(home, '.claude.json'), JSON.stringify({ oauthAccount: { organizationUuid: active.split('_')[0], accountUuid: active.split('_')[1] } }));
+  await assert.rejects(archiveSyncedBucket(home, active, backups), /signed-in/);
+  await assert.rejects(archiveSyncedBucket(home, '../../etc', backups), /Not a claude\.ai sync folder/);
+  const dest = await archiveSyncedBucket(home, other, backups);
+  await fs.access(path.join(dest, 'docs/SKILL.md'));
+  await assert.rejects(fs.access(path.join(home, '.claude/skills/synced', other)));
+  await fs.access(path.join(home, '.claude/skills/synced', active, 'docs/SKILL.md'));
 });

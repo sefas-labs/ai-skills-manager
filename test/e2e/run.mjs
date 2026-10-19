@@ -53,6 +53,12 @@ const head = await fetch('https://api.github.com/repos/anthropics/skills/commits
 const tree = await fetch(`https://api.github.com/repos/anthropics/skills/git/trees/${head.sha}?recursive=1`, { headers: { 'User-Agent': 'ai-skills-manager-e2e' } }).then((r) => r.json());
 ghSkill('pdf-current', tree.tree.find((e) => e.path === 'skills/pdf').sha);
 ghSkill('pdf-stale', '0'.repeat(40));
+// The same skill in .agents/skills and .cursor/skills: the Cursor-only copy is redundant.
+fs.mkdirSync(path.join(workspace, '.cursor/skills/e2e-skill'), { recursive: true });
+fs.copyFileSync(path.join(workspace, '.agents/skills/e2e-skill/SKILL.md'), path.join(workspace, '.cursor/skills/e2e-skill/SKILL.md'));
+// A skill whose `name` doesn't match its folder (fixable).
+fs.mkdirSync(path.join(workspace, '.agents/skills/needs-fix'), { recursive: true });
+fs.writeFileSync(path.join(workspace, '.agents/skills/needs-fix/SKILL.md'), '---\nname: Wrong Name\ndescription: Fix me.\n---\n');
 
 // Minimal CONNECT proxy that records which hosts went through it.
 const proxied = [];

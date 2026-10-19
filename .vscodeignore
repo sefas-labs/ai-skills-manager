@@ -5,6 +5,8 @@
 !LICENSE
 !dist/extension.js
 !dist/webview.js
+!dist/codicons/codicon.css
+!dist/codicons/codicon.ttf
 !media/dashboard.css
 !media/icon.svg
 !media/icon.png

@@ -33,9 +33,20 @@ export interface ReadLocation {
    */
   managedSubdirs?: Record<string, string>;
   /** 'parent': above the workspace folder, up to the repo root. 'nested': below it. */
-  origin?: 'parent' | 'nested';
+  origin?: 'parent' | 'nested' | 'plugin';
   /** For nested folders: the sub-folder (relative to the workspace folder) the skills belong to. */
   appliesTo?: string;
+  /** Skills here are invoked as `<namespace>:<name>` (plugin skills), so they never clash by name. */
+  namespace?: string;
+}
+
+export interface SkippedSyncBucket {
+  /** Folder name: `<organizationUuid>_<accountUuid>`. */
+  bucket: string;
+  path: string;
+  skills: string[];
+  /** From the bucket's manifest.json, when readable. */
+  lastSynced?: string;
 }
 
 export interface DiscoveryContext {
@@ -46,8 +57,14 @@ export interface DiscoveryContext {
   repoRoots?: Record<string, string>;
   /** Workspace folder → relative sub-folders containing nested skills folders. */
   nestedDirs?: Record<string, string[]>;
+  /** Skill roots of enabled Claude Code plugins (see plugins.ts). */
+  claudePlugins?: ReadLocation[];
+  /** Cursor's built-in skills and local plugins (see plugins.ts). */
+  cursorPlugins?: ReadLocation[];
   /** VS Code `chat.useCustomizationsInParentRepositories`. */
   copilotParentRepo?: boolean;
+  /** `<org>_<account>` of the signed-in claude.ai account: other accounts' synced buckets are skipped. */
+  claudeSyncBucket?: string;
 }
 
 export interface ProviderAdapter {
@@ -61,6 +78,8 @@ export interface ProviderAdapter {
   disableHint?: string;
   /** Nested skills get their own namespace (Claude Code: /apps/web:deploy), so same names don't clash. */
   namespacesNested?: boolean;
+  /** Finds SKILL.md in sub-folders of a skills root too (Cursor: skills/<group>/<skill>/SKILL.md). */
+  recursiveRoots?: boolean;
 }
 
 /** A skills root after merging what all adapters declared. */
@@ -74,12 +93,21 @@ export interface ResolvedLocation {
   readOnlyReason?: string;
   workspaceFolder?: string;
   managedSubdirs?: Record<string, string>;
-  origin?: 'parent' | 'nested';
+  origin?: 'parent' | 'nested' | 'plugin';
   appliesTo?: string;
+  /** Readers that also load skills from category sub-folders of this root. */
+  recursiveReaders?: ProviderId[];
+  namespace?: string;
   exists: boolean;
   skillCount: number;
   /** Entries in the folder that agents will ignore (no SKILL.md, etc). */
   ignoredEntries: string[];
+  /** Skills synced for other claude.ai accounts, not loaded by Claude Code and not listed. */
+  skippedSynced?: number;
+  /** Detail of those leftovers, one entry per other-account bucket. */
+  skippedSyncedBuckets?: SkippedSyncBucket[];
+  /** The signed-in account's bucket, when known. */
+  activeSyncBucket?: { bucket: string; lastSynced?: string };
 }
 
 export interface GitHubSource {
@@ -136,6 +164,12 @@ export interface SkillRecord {
   readOnlyReason?: string;
   /** Name of the managed sub-folder it was found in (e.g. 'synced'). */
   managed?: string;
+  /** Content fingerprint, computed only when another folder has a skill with the same name. */
+  contentId?: string;
+  /** Category folder it sits in (skills/<group>/<skill>); only recursive readers load it. */
+  group?: string;
+  /** Invoked as `<namespace>:<name>` (plugin skills). */
+  namespace?: string;
   source?: LockEntry;
   /** Hint found in frontmatter metadata (e.g. written by `gh skill`). */
   sourceHint?: string;

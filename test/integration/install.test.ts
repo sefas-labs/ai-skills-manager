@@ -211,3 +211,15 @@ test('read-only locations refuse install and uninstall', async () => {
   const admin = r.locations.find((l) => l.scope === 'admin')!;
   await assert.rejects(planInstall([], admin), /read-only/);
 });
+
+test('two backups of same-named folders in the same millisecond do not collide', async () => {
+  const { home, ctx, lock, storage } = await env();
+  await writeSkill(path.join(home, '.agents/skills'), 'twin');
+  await writeSkill(path.join(home, '.cursor/skills'), 'twin');
+  const r = await discover(ctx, BUILTIN_PROVIDERS, { lock });
+  const twins = r.skills.filter((s) => s.name === 'twin');
+  const trashRoot = path.join(storage, 'trash');
+  const out = await Promise.all(twins.map((s) => uninstallSkill(s, r.locations.find((l) => l.id === s.locationId)!, { lock, trashRoot })));
+  assert.equal(new Set(out.map((o) => o.backupDir)).size, 2);
+  assert.equal((await fs.readdir(trashRoot)).length, 2);
+});

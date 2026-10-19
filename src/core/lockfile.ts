@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { pathKey } from './paths';
 import type { LockEntry } from './types';
 
@@ -17,6 +18,8 @@ interface LockFileShape {
 export class LockStore {
   private data: LockFileShape = { version: 1, entries: {} };
   private loaded = false;
+  /** Saves run one after another: concurrent installs/removals must not race on the file. */
+  private saving: Promise<void> = Promise.resolve();
 
   constructor(private readonly file: string, private readonly platform: NodeJS.Platform = process.platform) {}
 
@@ -25,8 +28,9 @@ export class LockStore {
       const raw = await fs.readFile(this.file, 'utf8');
       const parsed = JSON.parse(raw) as LockFileShape;
       if (parsed && parsed.version === 1 && parsed.entries && typeof parsed.entries === 'object') this.data = parsed;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+    } catch (error) {
+      const fileMissing = (error as NodeJS.ErrnoException).code === 'ENOENT';
+      if (!fileMissing) {
         // Corrupt lock: keep a copy and start fresh rather than crash.
         await fs.copyFile(this.file, `${this.file}.corrupt-${Date.now()}`).catch(() => undefined);
       }
@@ -55,10 +59,14 @@ export class LockStore {
     await this.save();
   }
 
-  private async save(): Promise<void> {
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(this.data, null, 2), 'utf8');
-    await fs.rename(tmp, this.file);
+  private save(): Promise<void> {
+    const writeAtomically = async () => {
+      await fs.mkdir(path.dirname(this.file), { recursive: true });
+      const tempFile = `${this.file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+      await fs.writeFile(tempFile, JSON.stringify(this.data, null, 2), 'utf8');
+      await fs.rename(tempFile, this.file);
+    };
+    this.saving = this.saving.then(writeAtomically, writeAtomically);
+    return this.saving;
   }
 }

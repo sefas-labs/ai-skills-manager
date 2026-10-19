@@ -6,18 +6,23 @@ Claude Code, Cursor, Codex and GitHub Copilot read skills (`SKILL.md`) from over
 
 Screenshots are in `docs/images/`.
 
-## What it does (v0.2)
+## What it does (v0.3)
 
 - **Multi-agent inventory:** scans the global and workspace folders that each agent reads according to its official documentation, plus any extra folders you configure.
   - **Monorepos:** also scans parent folders up to the repository root (Claude Code, Codex) and nested skills folders (Claude Code, Cursor).
-  - Includes skills synced from claude.ai (`~/.claude/skills/synced`, read-only).
+  - Includes skills synced from claude.ai (`~/.claude/skills/synced`, read-only; only the signed-in account's), Claude Code **plugin** and **enterprise** skills (read-only, shown as `<plugin>:<skill>`), and Cursor's **category folders** (`skills/<group>/<skill>`).
 - **Visibility matrix:** which agent loads which folder, and therefore each skill.
+- **Map tab:** a skill × agent coverage table that says why an agent can't use a skill and copies it to the folder that closes the gap, plus an interactive agent → folder → skill diagram.
+- **Knows your setup:** recognizes whether it runs in Cursor or VS Code and highlights that editor's agent. It also detects which of the four agents are installed (from files only: CLI on PATH, app, config file or editor extension; nothing is executed) and hides the ones it can't find, with a toggle to show all.
 - **Diagnostics:**
   - duplicate names that one agent sees in two different folders;
   - frontmatter that breaks the [agentskills.io](https://agentskills.io/specification) spec (`name` ≠ folder name, missing `description`, length limits);
   - `skill.md` with the wrong casing;
   - broken symlinks;
   - folders without a `SKILL.md`.
+- **Merge suggestions for duplicates:** when the same skill sits in several folders of the same scope, it suggests the smallest set of copies that still reaches every installed agent. *Merge* moves the redundant copies to the backup folder, *Use this version* makes differing copies identical, and *Compare* opens a file-by-file diff.
+- **One-click fixes:** *Fix…* next to each fixable problem (or *Fix all*): set `name` to the folder name or rename the folder, add a missing `name`/`description`/frontmatter, rename `skill.md` to `SKILL.md`, remove a broken link. The exact change is shown first, SKILL.md edits are minimal one-line edits, and a backup is kept.
+- **Skills catalog:** browse well-known collections (Anthropic, OpenAI, Awesome Copilot, Vercel, Microsoft, Hugging Face, NVIDIA, Superpowers) or search all of GitHub (sign-in required), see what you already have, and install through the same review flow.
 - **Install from GitHub** (repository, folder, `…/blob/…/SKILL.md` or `owner/repo`):
   1. Analyzes the repository and rejects anything that isn't a skill, with a hint when it looks like a plugin or an MCP server.
   2. Lets you choose which skills to install.
@@ -27,6 +32,11 @@ Screenshots are in `docs/images/`.
 - **Safe uninstall:** the folder is moved to a recoverable backup. If it's a symlink, only the link is removed.
 - **Provenance:** records the repository, ref, commit and tree SHA of everything it installs. It also reads the provenance that `gh skill install` writes into `SKILL.md`.
 - **Updates:** *Check for Updates* compares the installed tree SHA with the remote one (2 API calls per repository and branch). *Update…* first shows the added, modified and removed files, your local edits and the security review, then replaces the folder and keeps a backup.
+- **On / off per agent:** Claude Code (`skillOverrides`: on, name only, only `/name`, off), Codex (`[[skills.config]] enabled = false`), and Cursor/Copilot (`disable-model-invocation` / `user-invocable` in the skill, with a warning that it edits the skill). Every change shows the exact file first and keeps a backup.
+- **Config tab:** the instruction files (including nested `CLAUDE.md`/`AGENTS.md`), rules, subagents and Copilot custom agents, commands and prompt files, and MCP servers each agent loads (`CLAUDE.md`, `AGENTS.md`, `.cursor/rules`, `.github/instructions`, `.github/agents`, `.github/prompts`, `.mcp.json`, `~/.claude.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, Codex `config.toml`…). MCP environment variables and headers show names only; secret-looking arguments and connection-string passwords are masked.
+  - **Create** a rule, subagent, command or prompt file from a per-agent template (never overwrites), or **delete** one to the backup folder.
+  - **Add, remove** (and, for Codex, **enable/disable**) MCP servers, written in each agent's documented format. Every change shows the exact file and entry first and keeps a backup. `~/.claude.json` is left to `claude mcp`, and JSON files with comments are left for you to edit by hand.
+- **Add to project:** one click copies a global skill into the open project's skills folder that reaches the most installed agents.
 - **Copy or move** between folders (global ↔ workspace, `.claude/skills` ↔ `.agents/skills`): before writing, shows which agents gain and lose the skill.
 - Side bar, dashboard, light/dark/high-contrast themes, Workspace Trust.
 
@@ -63,6 +73,7 @@ Screenshots are in `docs/images/`.
 | `skillsManager.showEmptyLocations` | Show existing folders that contain no skills |
 | `skillsManager.scanParentFolders` | Parent folders up to the repository root (default: on) |
 | `skillsManager.scanNestedFolders` | Skills folders nested inside the workspace (default: on; max depth 6, skips `node_modules` and build folders) |
+| `skillsManager.scanPlugins` | Skills of enabled Claude Code plugins (default: on) |
 | `skillsManager.checkForUpdatesOnStartup` | Check for updates on startup, at most every 12 hours (default: off) |
 
 ## Development
@@ -72,8 +83,8 @@ Requirements: Node 18+ and VS Code 1.90+.
 ```bash
 npm install
 npm run build        # esbuild → dist/
-npm test             # 57 unit + integration tests (Node test runner, simulated GitHub)
-npm run test:smoke   # loads dist/extension.js against a simulated vscode API
+npm test             # 91 unit + integration tests (Node test runner, simulated GitHub)
+npm run test:smoke   # bundled extension with a simulated vscode API: activation, dashboard in jsdom, full dialog flows
 npm run test:e2e     # runs the extension inside real VS Code (temporary profile, local proxy, real GitHub)
 node test/e2e/run.mjs /Applications/Cursor.app/Contents/MacOS/Cursor   # same, in Cursor
 npm run typecheck    # tsc with @types/vscode
@@ -93,18 +104,18 @@ npm run typecheck    # tsc with @types/vscode
 
 ```bash
 npm run build -- --production
-npm run package             # official: @vscode/vsce → ai-skills-manager-0.2.0.vsix
+npm run package             # official: @vscode/vsce → ai-skills-manager-0.3.0.vsix
 # without npm/vsce access:
 npm run package:offline     # dependency-free packager (scripts/package-vsix.mjs)
 ```
 
-Install: `code --install-extension ai-skills-manager-0.2.0.vsix`, or **Extensions: Install from VSIX…** in the command palette.
+Install: `code --install-extension ai-skills-manager-0.3.0.vsix`, or **Extensions: Install from VSIX…** in the command palette.
 
-Publishing to the Marketplace requires `vsce publish` with a real publisher (change `publisher` in `package.json`). For Open VSX (which Cursor uses): `npx ovsx publish ai-skills-manager-0.2.0.vsix -p <token>`.
+Publishing to the Marketplace requires `vsce publish` with a real publisher (change `publisher` in `package.json`). For Open VSX (which Cursor uses): `npx ovsx publish ai-skills-manager-0.3.0.vsix -p <token>`.
 
 ### Test in Cursor
 
-1. Install the VSIX: command palette → **Extensions: Install from VSIX…**, or `cursor --install-extension ai-skills-manager-0.2.0.vsix`.
+1. Install the VSIX: command palette → **Extensions: Install from VSIX…**, or `cursor --install-extension ai-skills-manager-0.3.0.vsix`.
 2. Checklist:
    - [ ] The **AI Skills** icon appears in the side bar.
    - [ ] The matrix shows `~/.cursor/skills`, `~/.agents/skills`, `~/.claude/skills` and `~/.codex/skills` as read by Cursor.
@@ -112,17 +123,16 @@ Publishing to the Marketplace requires `vsce publish` with a real publisher (cha
    - [x] Cursor 3.25.9 provides the `github` auth provider (verified with `test:e2e`). Without signing in, the extension keeps working (limit of 60 requests/hour).
    - [ ] Remove the skill and check that Cursor no longer sees it.
 
-## Known limitations (v0.2)
+## Known limitations (v0.3)
 
-- Doesn't show skills from plugins (Claude/Cursor), Claude Code's enterprise path, or skills contributed by VS Code extensions.
-- Cursor walks each skills folder recursively (`skills/<group>/<skill>/SKILL.md`); this extension only reads the first level.
+- MCP: no editing of existing server entries (remove and add again), of `~/.claude.json` (use `claude mcp`) or of JSON files with comments. Enable/disable only for Codex; the other agents do it in their own UI.
+- Not covered: Cursor user rules (kept in its settings), skills contributed by VS Code extensions. Cursor's built-in skills folder and the layout of claude.ai synced plugins were observed on disk, not documented.
 - GitHub only (no GitLab or Bitbucket). In huge repositories the file tree may come back truncated.
-- The install, update, copy/move and uninstall dialogs have no automated test in the real editor (they need clicks): see *Pendiente de prueba manual* in `docs/ANALISIS.md`.
+- Every dialog flow is tested end to end with the bundled extension and a simulated editor; a manual pass in the real editors is still listed under *Pendiente de prueba manual* in `docs/ANALISIS.md`.
 - The proxy was verified with `http.proxy` in VS Code 1.140 and Cursor 3.25.9 (based on VS Code 1.128). In older VS Code versions, `fetch` may not honor it.
-- No enable/disable yet, and no management of MCP servers, agents or rules: see the roadmap in `docs/ANALISIS.md`.
 
 Full market, product and architecture analysis (in Spanish): `docs/ANALISIS.md`.
 
 ## License
 
-MIT
+MIT. The dashboard bundles [Codicons](https://github.com/microsoft/vscode-codicons) (icon font © Microsoft, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)).

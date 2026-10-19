@@ -1,21 +1,52 @@
 import * as vscode from 'vscode';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { discover, DiscoverOptions } from '../core/discovery';
+import { detectAgents, hostAgentFor, type AgentDetection } from '../core/agents';
+import { discover, DiscoverOptions, readClaudeSyncBucket } from '../core/discovery';
+import { fixesFor } from '../core/fixes';
+import { mcpDuplicates, readCustomizations, type CustomizationInput, type CustomizationItem } from '../core/customizations';
+import { CatalogStore } from './catalog';
+import { readToggleState, toggleFiles, type SkillToggleState } from '../core/toggles';
+import { mergeSuggestions, type MergeSuggestion } from '../core/merge';
 import { LockStore } from '../core/lockfile';
 import { BUILTIN_PROVIDERS } from '../core/providers';
 import { pathKey, tildify } from '../core/paths';
 import { trackedFromLock } from '../core/provenance';
 import { basisOf, type UpdateCheck } from '../core/updates';
 import type { DiscoveryContext, DiscoveryResult, ProviderAdapter, ReadLocation, ResolvedLocation, SkillRecord, TrackedSource } from '../core/types';
-import type { ViewSkill, ViewState } from '../shared/protocol';
+import type { ViewCustomization, ViewSkill, ViewState } from '../shared/protocol';
+
+declare const __BUILD_ID__: string;
+
+const UPDATE_CACHE_KEY = 'skillsManager.updateCache';
+const DEFAULT_REFRESH_DELAY_MS = 300;
+/** Global folders outside the workspace can change while the editor is in the background. */
+const REFRESH_ON_FOCUS_DELAY_MS = 800;
+const MAX_FRONTMATTER_VALUE_LENGTH = 600;
+const LOCAL_SCOPE_MARKER = '#local';
+const UNTRUSTED_WORKSPACE_REASON = 'Workspace is not trusted (Restricted Mode).';
+/** Workspace folders where a new skills folder may appear. */
+const NEW_SKILL_GLOB = '**/{.claude,.cursor,.agents,.codex,.github}/skills/*/SKILL.md';
+/** Settings outside `skillsManager` that change what agents load. */
+const RELATED_SETTINGS = ['skillsManager', 'chat.useCustomizationsInParentRepositories', 'chat.useNestedAgentsMdFiles'];
+
+interface UpdateCache {
+  checkedAt?: string;
+  results: Record<string, UpdateCheck>;
+}
+
+interface ExtraLocationSetting {
+  path: string;
+  scope?: string;
+  readers?: string[];
+}
 
 /** Owns the current scan result, file watching and storage paths. */
 export class SkillsService implements vscode.Disposable {
   private readonly emitter = new vscode.EventEmitter<DiscoveryResult>();
   readonly onDidChange = this.emitter.event;
   private result: DiscoveryResult | undefined;
-  private timer: NodeJS.Timeout | undefined;
+  private refreshTimer: NodeJS.Timeout | undefined;
   private watchers: vscode.Disposable[] = [];
   private readonly disposables: vscode.Disposable[] = [];
   private refreshing: Promise<DiscoveryResult> | undefined;
@@ -23,6 +54,12 @@ export class SkillsService implements vscode.Disposable {
   githubSignedIn = false;
   private updates: Record<string, UpdateCheck>;
   updatesCheckedAt: string | undefined;
+  agents: Record<string, AgentDetection> = {};
+  readonly catalog = new CatalogStore(this);
+  merges: MergeSuggestion[] = [];
+  customizations: CustomizationItem[] = [];
+  private toggles = new Map<string, SkillToggleState>();
+  readonly hostAgent = hostAgentFor(vscode.env.appName);
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.lock = new LockStore(path.join(this.storageDir, 'skills-lock.json'));
@@ -33,12 +70,11 @@ export class SkillsService implements vscode.Disposable {
       this.emitter,
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.scheduleRefresh()),
       vscode.workspace.onDidGrantWorkspaceTrust(() => this.scheduleRefresh()),
-      vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('skillsManager') || e.affectsConfiguration('chat.useCustomizationsInParentRepositories')) this.scheduleRefresh();
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (RELATED_SETTINGS.some((setting) => event.affectsConfiguration(setting))) this.scheduleRefresh();
       }),
-      // Global folders outside the workspace can appear at any time (another tool installed something).
-      vscode.window.onDidChangeWindowState((s) => {
-        if (s.focused) this.scheduleRefresh(800);
+      vscode.window.onDidChangeWindowState((state) => {
+        if (state.focused) this.scheduleRefresh(REFRESH_ON_FOCUS_DELAY_MS);
       }),
     );
   }
@@ -58,49 +94,88 @@ export class SkillsService implements vscode.Disposable {
   }
 
   adapters(): ProviderAdapter[] {
-    const enabled = vscode.workspace.getConfiguration('skillsManager').get<string[]>('providers');
-    if (!enabled || enabled.length === 0) return BUILTIN_PROVIDERS;
-    return BUILTIN_PROVIDERS.filter((p) => enabled.includes(p.id));
+    const enabledIds = vscode.workspace.getConfiguration('skillsManager').get<string[]>('providers');
+    if (!enabledIds || enabledIds.length === 0) return BUILTIN_PROVIDERS;
+    return BUILTIN_PROVIDERS.filter((provider) => enabledIds.includes(provider.id));
   }
 
-  context_(): DiscoveryContext {
+  discoveryContext(): DiscoveryContext {
+    const localFolders = (vscode.workspace.workspaceFolders ?? []).filter((folder) => folder.uri.scheme === 'file');
     return {
       homeDir: os.homedir(),
-      workspaceFolders: (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === 'file').map((f) => f.uri.fsPath),
+      workspaceFolders: localFolders.map((folder) => folder.uri.fsPath),
       platform: process.platform,
       copilotParentRepo: vscode.workspace.getConfiguration('chat').get<boolean>('useCustomizationsInParentRepositories') === true,
     };
   }
 
-  private options(ctx: DiscoveryContext): DiscoverOptions {
-    const cfg = vscode.workspace.getConfiguration('skillsManager');
-    const raw = cfg.get<Array<{ path: string; scope?: string; readers?: string[] }>>('extraLocations') ?? [];
-    const extra: Array<ReadLocation & { readers: string[] }> = [];
-    for (const e of raw) {
-      if (!e || typeof e.path !== 'string' || !e.path.trim()) continue;
-      let p = e.path.trim();
-      if (p.startsWith('~')) p = path.join(ctx.homeDir, p.slice(1));
-      if (!path.isAbsolute(p) && ctx.workspaceFolders[0]) p = path.join(ctx.workspaceFolders[0], p);
-      extra.push({
-        path: p,
-        scope: e.scope === 'workspace' ? 'workspace' : 'global',
-        readers: Array.isArray(e.readers) && e.readers.length ? e.readers : ['custom'],
+  /** `skillsManager.extraLocations`, with `~` and workspace-relative paths resolved. */
+  private extraLocations(context: DiscoveryContext): Array<ReadLocation & { readers: string[] }> {
+    const settings = vscode.workspace.getConfiguration('skillsManager').get<ExtraLocationSetting[]>('extraLocations') ?? [];
+    const locations: Array<ReadLocation & { readers: string[] }> = [];
+    for (const setting of settings) {
+      if (!setting || typeof setting.path !== 'string' || !setting.path.trim()) continue;
+      let locationPath = setting.path.trim();
+      if (locationPath.startsWith('~')) locationPath = path.join(context.homeDir, locationPath.slice(1));
+      const firstFolder = context.workspaceFolders[0];
+      if (!path.isAbsolute(locationPath) && firstFolder) locationPath = path.join(firstFolder, locationPath);
+      const hasReaders = Array.isArray(setting.readers) && setting.readers.length > 0;
+      locations.push({
+        path: locationPath,
+        scope: setting.scope === 'workspace' ? 'workspace' : 'global',
+        readers: hasReaders ? setting.readers! : ['custom'],
       });
     }
+    return locations;
+  }
+
+  private discoverOptions(context: DiscoveryContext): DiscoverOptions {
+    const settings = vscode.workspace.getConfiguration('skillsManager');
     return {
       lock: this.lock,
-      extraLocations: extra,
-      workspaceReadOnlyReason: vscode.workspace.isTrusted ? undefined : 'Workspace is not trusted (Restricted Mode).',
-      monorepo: { parents: cfg.get<boolean>('scanParentFolders', true), nested: cfg.get<boolean>('scanNestedFolders', true) },
+      extraLocations: this.extraLocations(context),
+      workspaceReadOnlyReason: vscode.workspace.isTrusted ? undefined : UNTRUSTED_WORKSPACE_REASON,
+      monorepo: { parents: settings.get<boolean>('scanParentFolders', true), nested: settings.get<boolean>('scanNestedFolders', true) },
+      plugins: settings.get<boolean>('scanPlugins', true) ? { pluginsRoot: process.env.CLAUDE_CODE_PLUGIN_CACHE_DIR } : undefined,
     };
+  }
+
+  private detectInstalledAgents(context: DiscoveryContext, adapters: ProviderAdapter[]): Promise<Record<string, AgentDetection>> {
+    return detectAgents(
+      adapters.map((adapter) => adapter.id),
+      {
+        homeDir: context.homeDir,
+        platform: context.platform,
+        pathDirs: (process.env.PATH ?? '').split(path.delimiter).filter(Boolean),
+        extensionIds: vscode.extensions.all.map((extension) => extension.id),
+        hostAgent: this.hostAgent,
+      },
+    ).catch(() => ({}));
+  }
+
+  private async readToggles(result: DiscoveryResult, context: DiscoveryContext): Promise<Map<string, SkillToggleState>> {
+    const entries = await Promise.all(
+      result.skills.map(async (skill) => {
+        const workspaceFolder = skill.scope === 'workspace' ? this.location(skill.locationId, result)?.workspaceFolder : context.workspaceFolders[0];
+        const state = await readToggleState(skill, toggleFiles(context.homeDir, workspaceFolder)).catch(() => undefined);
+        return [skill.id, state] as const;
+      }),
+    );
+    return new Map(entries.filter((entry): entry is readonly [string, SkillToggleState] => !!entry[1]));
   }
 
   async refresh(): Promise<DiscoveryResult> {
     if (this.refreshing) return this.refreshing;
     this.refreshing = (async () => {
       await this.lock.load();
-      const ctx = this.context_();
-      const result = await discover(ctx, this.adapters(), this.options(ctx));
+      const context = { ...this.discoveryContext(), claudeSyncBucket: await readClaudeSyncBucket(os.homedir()) };
+      const adapters = this.adapters();
+      const [result, agents] = await Promise.all([discover(context, adapters, this.discoverOptions(context)), this.detectInstalledAgents(context, adapters)]);
+      this.agents = agents;
+      this.customizations = await readCustomizations(this.customizationInput(context)).catch(() => []);
+      const installedAgents = Object.entries(agents).filter(([, detection]) => detection.installed).map(([agentId]) => agentId);
+      this.merges = await mergeSuggestions(result.skills, result.locations, { relevantAgents: installedAgents }).catch(() => []);
+      this.toggles = await this.readToggles(result, context);
       this.result = result;
       this.rewatch(result.locations);
       this.emitter.fire(result);
@@ -113,143 +188,201 @@ export class SkillsService implements vscode.Disposable {
     }
   }
 
-  scheduleRefresh(delay = 300): void {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
-      this.refresh().catch((e) => console.error('[skills-manager] refresh failed', e));
-    }, delay);
+  scheduleRefresh(delayMs = DEFAULT_REFRESH_DELAY_MS): void {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    this.refreshTimer = setTimeout(() => {
+      this.refresh().catch((error) => console.error('[skills-manager] refresh failed', error));
+    }, delayMs);
+  }
+
+  private watch(watcher: vscode.FileSystemWatcher, events: { change: boolean }): void {
+    const refresh = () => this.scheduleRefresh();
+    watcher.onDidCreate(refresh);
+    watcher.onDidDelete(refresh);
+    if (events.change) watcher.onDidChange(refresh);
+    this.watchers.push(watcher);
   }
 
   private rewatch(locations: ResolvedLocation[]): void {
-    for (const w of this.watchers) w.dispose();
+    for (const watcher of this.watchers) watcher.dispose();
     this.watchers = [];
-    for (const loc of locations) {
-      if (!loc.exists) continue;
-      const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(loc.path), '**/*'));
-      const fire = () => this.scheduleRefresh();
-      w.onDidCreate(fire);
-      w.onDidDelete(fire);
-      w.onDidChange(fire);
-      this.watchers.push(w);
+    for (const location of locations.filter((candidate) => candidate.exists)) {
+      this.watch(vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(location.path), '**/*')), { change: true });
     }
-    // Detect skills folders being created inside the workspace.
-    const ws = vscode.workspace.createFileSystemWatcher('**/{.claude,.cursor,.agents,.codex,.github}/skills/*/SKILL.md');
-    ws.onDidCreate(() => this.scheduleRefresh());
-    ws.onDidDelete(() => this.scheduleRefresh());
-    this.watchers.push(ws);
+    this.watch(vscode.workspace.createFileSystemWatcher(NEW_SKILL_GLOB), { change: false });
   }
 
   skill(id: string): SkillRecord | undefined {
-    return this.result?.skills.find((s) => s.id === id);
+    return this.result?.skills.find((skill) => skill.id === id);
   }
 
-  location(id: string): ResolvedLocation | undefined {
-    return this.result?.locations.find((l) => l.id === id);
+  location(id: string, result = this.result): ResolvedLocation | undefined {
+    return result?.locations.find((location) => location.id === id);
   }
 
   providerName(id: string): string {
-    return BUILTIN_PROVIDERS.find((p) => p.id === id)?.displayName ?? id;
+    return BUILTIN_PROVIDERS.find((provider) => provider.id === id)?.displayName ?? id;
+  }
+
+  /** Display names of agents, comma-separated; `whenEmpty` when there are none. */
+  agentNames(ids: string[], whenEmpty = 'none', separator = ', '): string {
+    return ids.map((id) => this.providerName(id)).join(separator) || whenEmpty;
   }
 
   /** Provenance usable for updates: our lock first, else what `gh skill` wrote. */
-  tracked(s: SkillRecord): TrackedSource | undefined {
-    return s.source ? trackedFromLock(s.source) : s.ghSource;
+  tracked(skill: SkillRecord): TrackedSource | undefined {
+    return skill.source ? trackedFromLock(skill.source) : skill.ghSource;
   }
 
   /** Skills an update can be applied to in place (real folders directly inside a writable location). */
   updatable(): Array<{ skill: SkillRecord; source: TrackedSource }> {
-    const out: Array<{ skill: SkillRecord; source: TrackedSource }> = [];
+    const updatable: Array<{ skill: SkillRecord; source: TrackedSource }> = [];
     for (const skill of this.result?.skills ?? []) {
       const source = this.tracked(skill);
-      if (source && !skill.isSymlink && !skill.managed) out.push({ skill, source });
+      if (source && !skill.isSymlink && !skill.managed) updatable.push({ skill, source });
     }
-    return out;
+    return updatable;
   }
 
-  updateFor(s: SkillRecord): UpdateCheck | undefined {
-    const u = this.updates[pathKey(s.dir)];
-    const src = this.tracked(s);
+  updateFor(skill: SkillRecord): UpdateCheck | undefined {
+    const cached = this.updates[pathKey(skill.dir)];
+    const source = this.tracked(skill);
+    if (!cached || !source || cached.status === 'pinned' || cached.status === 'error') return cached;
     // A cached result is only valid for the version it was computed against.
-    if (!u || !src || u.status === 'pinned' || u.status === 'error') return u;
-    return u.basis === basisOf(src) ? u : undefined;
+    return cached.basis === basisOf(source) ? cached : undefined;
   }
 
   async storeUpdates(results: Record<string, UpdateCheck>, replace: boolean): Promise<void> {
-    const keyed: Record<string, UpdateCheck> = {};
-    for (const [dir, r] of Object.entries(results)) keyed[pathKey(dir)] = r;
-    this.updates = replace ? keyed : { ...this.updates, ...keyed };
+    const byPathKey: Record<string, UpdateCheck> = {};
+    for (const [dir, check] of Object.entries(results)) byPathKey[pathKey(dir)] = check;
+    this.updates = replace ? byPathKey : { ...this.updates, ...byPathKey };
     if (replace) this.updatesCheckedAt = new Date().toISOString();
     await this.context.globalState.update(UPDATE_CACHE_KEY, { checkedAt: this.updatesCheckedAt, results: this.updates } satisfies UpdateCache);
     if (this.result) this.emitter.fire(this.result);
   }
 
-  viewState(): ViewState | undefined {
-    const r = this.result;
-    if (!r) return undefined;
-    const home = r.context.homeDir;
-    const skills: ViewSkill[] = r.skills.map((s) => ({
-      id: s.id,
-      name: s.name,
-      dirName: s.dirName,
-      description: s.description,
-      dir: s.dir,
-      displayDir: tildify(s.dir, home),
-      realDir: s.isSymlink ? tildify(s.realDir, home) : '',
-      isSymlink: s.isSymlink,
-      locationId: s.locationId,
-      locationLabel: this.location(s.locationId)?.label ?? '',
-      scope: s.scope,
-      visibleTo: s.visibleTo,
-      frontmatter: Object.entries(s.frontmatter).map(([k, v]) => [k, stringifyValue(v)] as [string, string]),
-      issues: s.issues,
-      readOnly: s.readOnly,
-      readOnlyReason: s.readOnlyReason,
-      source: s.source
-        ? { url: s.source.source.url, ref: s.source.source.ref, commit: s.source.source.commit, installedAt: s.source.installedAt }
-        : undefined,
-      sourceHint: s.sourceHint,
-      tracked: this.tracked(s)?.origin,
-      update: this.viewUpdate(s),
-      skillMdLines: s.skillMdLines,
-    }));
+  /** What readCustomizations / mcpTargets need, for this editor. */
+  customizationInput(context: { homeDir: string; workspaceFolders: string[]; platform: NodeJS.Platform } = this.current!.context): CustomizationInput {
+    // VS Code keeps the profile's mcp.json next to globalStorage (User/mcp.json); Cursor uses ~/.cursor/mcp.json.
+    const vscodeProfileDir = this.hostAgent === 'copilot' ? path.dirname(path.dirname(this.storageDir)) : undefined;
     return {
-      scannedAt: r.scannedAt,
-      updatesCheckedAt: this.updatesCheckedAt,
-      trusted: vscode.workspace.isTrusted,
-      githubSignedIn: this.githubSignedIn,
-      hasWorkspace: r.context.workspaceFolders.length > 0,
-      providers: r.providers,
-      locations: r.locations,
-      skills,
+      homeDir: context.homeDir,
+      workspaceFolders: context.workspaceFolders,
+      platform: context.platform,
+      vscodeUserMcp: vscodeProfileDir ? path.join(vscodeProfileDir, 'mcp.json') : undefined,
+      vscodeUserDir: vscodeProfileDir,
+      copilotNestedAgentsMd: vscode.workspace.getConfiguration('chat').get<boolean>('useNestedAgentsMdFiles') === true,
+      codexHome: process.env.CODEX_HOME,
     };
   }
 
-  private viewUpdate(s: SkillRecord): ViewSkill['update'] {
-    const u = this.updateFor(s);
-    if (!u) return undefined;
-    return { status: u.status, remoteCommit: u.remoteCommit, message: u.message, checkedAt: u.checkedAt };
+  private viewSkill(skill: SkillRecord, home: string): ViewSkill {
+    const lockSource = skill.source;
+    return {
+      id: skill.id,
+      name: skill.name,
+      dirName: skill.dirName,
+      description: skill.description,
+      dir: skill.dir,
+      displayDir: tildify(skill.dir, home),
+      realDir: skill.isSymlink ? tildify(skill.realDir, home) : '',
+      isSymlink: skill.isSymlink,
+      locationId: skill.locationId,
+      locationLabel: this.location(skill.locationId)?.label ?? '',
+      scope: skill.scope,
+      visibleTo: skill.visibleTo,
+      frontmatter: Object.entries(skill.frontmatter).map(([key, value]) => [key, displayValue(value)] as [string, string]),
+      issues: skill.issues,
+      readOnly: skill.readOnly,
+      readOnlyReason: skill.readOnlyReason,
+      managed: skill.managed,
+      namespace: skill.namespace,
+      group: skill.group,
+      toggles: this.toggles.get(skill.id),
+      contentId: skill.contentId,
+      source: lockSource ? { url: lockSource.source.url, ref: lockSource.source.ref, commit: lockSource.source.commit, installedAt: lockSource.installedAt } : undefined,
+      sourceHint: skill.sourceHint,
+      tracked: this.tracked(skill)?.origin,
+      fixes: fixesFor(skill, this.location(skill.locationId)).map(({ id, codes, label, detail }) => ({ id, codes, label, detail })),
+      update: this.viewUpdate(skill),
+      skillMdLines: skill.skillMdLines,
+    };
+  }
+
+  /** The absolute path stays in the host: the webview gets an index id and a `~` path. */
+  private viewCustomization(item: CustomizationItem, index: number, home: string): ViewCustomization {
+    const canBeDeleted = item.kind !== 'mcp' && item.kind !== 'instructions' && item.scope !== 'admin';
+    const { path: absolutePath, ...visible } = item;
+    return { ...visible, id: String(index), displayPath: tildify(absolutePath, home), deletable: canBeDeleted };
+  }
+
+  private viewMcpDuplicateFile(fileKey: string, home: string): string {
+    const isLocalScope = fileKey.endsWith(LOCAL_SCOPE_MARKER);
+    const file = isLocalScope ? fileKey.slice(0, -LOCAL_SCOPE_MARKER.length) : fileKey;
+    return tildify(file, home) + (isLocalScope ? ' (local)' : '');
+  }
+
+  viewState(): ViewState | undefined {
+    const result = this.result;
+    if (!result) return undefined;
+    const home = result.context.homeDir;
+    return {
+      scannedAt: result.scannedAt,
+      updatesCheckedAt: this.updatesCheckedAt,
+      buildId: __BUILD_ID__,
+      host: { appName: vscode.env.appName, agentId: this.hostAgent },
+      agents: this.agents,
+      customizations: {
+        items: this.customizations.map((item, index) => this.viewCustomization(item, index, home)),
+        mcpDuplicates: mcpDuplicates(this.customizations).map((duplicate) => ({
+          ...duplicate,
+          files: duplicate.files.map((fileKey) => this.viewMcpDuplicateFile(fileKey, home)),
+        })),
+      },
+      merges: this.merges.map((merge) => ({
+        ...merge,
+        copies: merge.copies.map((copy) => ({
+          skillId: copy.skillId,
+          displayDir: tildify(copy.dir, home),
+          locationLabel: copy.locationLabel,
+          readers: copy.readers,
+          writable: copy.writable,
+          version: copy.version,
+          modifiedAt: copy.modifiedAt,
+          changedFiles: copy.diff ? copy.diff.added.length + copy.diff.modified.length + copy.diff.removed.length : 0,
+        })),
+      })),
+      trusted: vscode.workspace.isTrusted,
+      githubSignedIn: this.githubSignedIn,
+      hasWorkspace: result.context.workspaceFolders.length > 0,
+      providers: result.providers,
+      locations: result.locations,
+      skills: result.skills.map((skill) => this.viewSkill(skill, home)),
+    };
+  }
+
+  private viewUpdate(skill: SkillRecord): ViewSkill['update'] {
+    const check = this.updateFor(skill);
+    if (!check) return undefined;
+    return { status: check.status, remoteCommit: check.remoteCommit, message: check.message, checkedAt: check.checkedAt };
   }
 
   dispose(): void {
-    if (this.timer) clearTimeout(this.timer);
-    for (const w of this.watchers) w.dispose();
-    for (const d of this.disposables) d.dispose();
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    for (const watcher of this.watchers) watcher.dispose();
+    for (const disposable of this.disposables) disposable.dispose();
   }
 }
 
-const UPDATE_CACHE_KEY = 'skillsManager.updateCache';
-
-interface UpdateCache {
-  checkedAt?: string;
-  results: Record<string, UpdateCheck>;
+function truncate(text: string): string {
+  return text.length > MAX_FRONTMATTER_VALUE_LENGTH ? text.slice(0, MAX_FRONTMATTER_VALUE_LENGTH) + '…' : text;
 }
 
-function stringifyValue(v: unknown): string {
-  if (typeof v === 'string') return v.length > 600 ? v.slice(0, 600) + '…' : v;
+function displayValue(value: unknown): string {
+  if (typeof value === 'string') return truncate(value);
   try {
-    const s = JSON.stringify(v);
-    return s.length > 600 ? s.slice(0, 600) + '…' : s;
+    return truncate(JSON.stringify(value));
   } catch {
-    return String(v);
+    return String(value);
   }
 }

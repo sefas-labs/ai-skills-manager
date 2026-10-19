@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import type { ResolvedLocation, Scope, SkillRecord } from '../core/types';
+import type { Issue, ResolvedLocation, Scope, SkillRecord } from '../core/types';
+import { fixesFor } from '../core/fixes';
 import type { SkillsService } from './service';
 
 type Node =
@@ -8,7 +9,22 @@ type Node =
   | { kind: 'skill'; skill: SkillRecord }
   | { kind: 'empty'; message: string };
 
+const SCOPE_ORDER: Scope[] = ['workspace', 'global', 'admin'];
 const SCOPE_LABEL: Record<Scope, string> = { workspace: 'Workspace', global: 'Global (user)', admin: 'Admin (system)' };
+const SCOPE_ICON: Record<Scope, string> = { workspace: 'root-folder', global: 'home', admin: 'shield' };
+const SEVERITY_ICON: Record<Issue['severity'], string> = { error: '$(error)', warning: '$(warning)', info: '$(info)' };
+const MAX_TOOLTIP_DESCRIPTION = 400;
+const MAX_TOOLTIP_ISSUES = 5;
+const SHORT_COMMIT_LENGTH = 7;
+const MARKDOWN_SPECIAL_CHARACTER = /[\\`*_{}[\]()#+\-.!|<>]/g;
+
+function escapeMarkdown(text: string): string {
+  return text.replace(MARKDOWN_SPECIAL_CHARACTER, '\\$&');
+}
+
+function countLabel(count: number, noun: string): string {
+  return `${count} ${noun}${count > 1 ? 's' : ''}`;
+}
 
 export class SkillsTreeProvider implements vscode.TreeDataProvider<Node> {
   private readonly emitter = new vscode.EventEmitter<Node | undefined>();
@@ -19,26 +35,26 @@ export class SkillsTreeProvider implements vscode.TreeDataProvider<Node> {
   }
 
   private visibleLocations(): ResolvedLocation[] {
-    const r = this.service.current;
-    if (!r) return [];
+    const result = this.service.current;
+    if (!result) return [];
     const showEmpty = vscode.workspace.getConfiguration('skillsManager').get<boolean>('showEmptyLocations', false);
-    return r.locations.filter((l) => l.skillCount > 0 || (showEmpty && l.exists) || l.ignoredEntries.length > 0);
+    return result.locations.filter((location) => location.skillCount > 0 || (showEmpty && location.exists) || location.ignoredEntries.length > 0);
   }
 
   getChildren(node?: Node): Node[] {
-    const r = this.service.current;
-    if (!r) return [];
+    const result = this.service.current;
+    if (!result) return [];
     if (!node) {
-      const scopes = new Set(this.visibleLocations().map((l) => l.scope));
-      return (['workspace', 'global', 'admin'] as Scope[]).filter((s) => scopes.has(s)).map((scope) => ({ kind: 'scope', scope }));
+      const scopesWithLocations = new Set(this.visibleLocations().map((location) => location.scope));
+      return SCOPE_ORDER.filter((scope) => scopesWithLocations.has(scope)).map((scope) => ({ kind: 'scope', scope }));
     }
     if (node.kind === 'scope') {
       return this.visibleLocations()
-        .filter((l) => l.scope === node.scope)
+        .filter((location) => location.scope === node.scope)
         .map((location) => ({ kind: 'location', location }));
     }
     if (node.kind === 'location') {
-      const skills = r.skills.filter((s) => s.locationId === node.location.id).sort((a, b) => a.name.localeCompare(b.name));
+      const skills = result.skills.filter((skill) => skill.locationId === node.location.id).sort((first, second) => first.name.localeCompare(second.name));
       if (skills.length === 0) return [{ kind: 'empty', message: 'No valid skills in this folder' }];
       return skills.map((skill) => ({ kind: 'skill', skill }));
     }
@@ -49,65 +65,14 @@ export class SkillsTreeProvider implements vscode.TreeDataProvider<Node> {
     switch (node.kind) {
       case 'scope': {
         const item = new vscode.TreeItem(SCOPE_LABEL[node.scope], vscode.TreeItemCollapsibleState.Expanded);
-        item.iconPath = new vscode.ThemeIcon(node.scope === 'workspace' ? 'root-folder' : node.scope === 'global' ? 'home' : 'shield');
+        item.iconPath = new vscode.ThemeIcon(SCOPE_ICON[node.scope]);
         item.contextValue = 'scope';
         return item;
       }
-      case 'location': {
-        const l = node.location;
-        const item = new vscode.TreeItem(l.label, vscode.TreeItemCollapsibleState.Expanded);
-        const where = l.origin === 'nested' ? `nested · ${l.appliesTo}/ · ` : l.origin === 'parent' ? 'parent folder · ' : '';
-        item.description = where + l.readers.map((r) => this.service.providerName(r)).join(' · ');
-        item.iconPath = new vscode.ThemeIcon(l.readOnly ? 'lock' : 'folder-library');
-        const md = new vscode.MarkdownString();
-        md.appendMarkdown(`**${escapeMd(l.label)}**\n\n`);
-        md.appendMarkdown(`Loaded by: ${l.readers.map((r) => this.service.providerName(r)).join(', ')}\n\n`);
-        md.appendText(l.path);
-        if (l.origin === 'nested') md.appendMarkdown(`\n\n$(info) Nested: agents load these when they work on files under ${escapeMd(l.appliesTo ?? '')}/ (Claude Code namespaces them as /${escapeMd(l.appliesTo ?? '')}:name).`);
-        if (l.origin === 'parent') md.appendMarkdown('\n\n$(info) Above the workspace folder, inside the same git repository.');
-        if (l.readOnly) md.appendMarkdown(`\n\n$(lock) Read-only: ${escapeMd(l.readOnlyReason ?? '')}`);
-        if (l.ignoredEntries.length) md.appendMarkdown(`\n\n$(info) Ignored by agents (no SKILL.md): ${l.ignoredEntries.map(escapeMd).join(', ')}`);
-        md.supportThemeIcons = true;
-        item.tooltip = md;
-        item.contextValue = 'location';
-        item.resourceUri = vscode.Uri.file(l.path);
-        return item;
-      }
-      case 'skill': {
-        const s = node.skill;
-        const item = new vscode.TreeItem(s.name, vscode.TreeItemCollapsibleState.None);
-        const errors = s.issues.filter((i) => i.severity === 'error').length;
-        const warnings = s.issues.filter((i) => i.severity === 'warning').length;
-        const flags: string[] = [];
-        const update = this.service.updateFor(s);
-        const hasUpdate = update?.status === 'update-available';
-        if (hasUpdate) flags.push('update available');
-        if (s.isSymlink) flags.push('link');
-        if (s.readOnly) flags.push('read-only');
-        if (errors) flags.push(`${errors} error${errors > 1 ? 's' : ''}`);
-        else if (warnings) flags.push(`${warnings} warning${warnings > 1 ? 's' : ''}`);
-        item.description = flags.join(' · ');
-        item.iconPath = errors
-          ? new vscode.ThemeIcon('error', new vscode.ThemeColor('list.errorForeground'))
-          : warnings
-            ? new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'))
-            : hasUpdate
-              ? new vscode.ThemeIcon('arrow-circle-up', new vscode.ThemeColor('charts.blue'))
-              : new vscode.ThemeIcon(s.isSymlink ? 'file-symlink-directory' : 'book');
-        const md = new vscode.MarkdownString();
-        md.supportThemeIcons = true;
-        md.appendMarkdown(`**${escapeMd(s.name)}**\n\n`);
-        if (s.description) md.appendText(s.description.slice(0, 400) + (s.description.length > 400 ? '…' : '') + '\n\n');
-        md.appendMarkdown(`Visible to: ${s.visibleTo.map((p) => this.service.providerName(p)).join(', ') || '—'}\n\n`);
-        if (hasUpdate) md.appendMarkdown(`$(arrow-circle-up) Update available${update?.remoteCommit ? ` (${update.remoteCommit.slice(0, 7)})` : ''}\n\n`);
-        for (const i of s.issues.slice(0, 5)) md.appendMarkdown(`${i.severity === 'error' ? '$(error)' : i.severity === 'warning' ? '$(warning)' : '$(info)'} ${escapeMd(i.message)}\n\n`);
-        item.tooltip = md;
-        // skill | skill-readonly, plus "+update" when an update can be applied.
-        item.contextValue = (s.readOnly ? 'skill-readonly' : 'skill') + (hasUpdate && !s.readOnly && !s.isSymlink ? '+update' : '');
-        item.id = s.id;
-        item.command = { command: 'skillsManager.showInDashboard', title: 'Show details', arguments: [node] };
-        return item;
-      }
+      case 'location':
+        return this.locationItem(node.location);
+      case 'skill':
+        return this.skillItem(node);
       case 'empty': {
         const item = new vscode.TreeItem(node.message, vscode.TreeItemCollapsibleState.None);
         item.iconPath = new vscode.ThemeIcon('circle-slash');
@@ -115,15 +80,97 @@ export class SkillsTreeProvider implements vscode.TreeDataProvider<Node> {
       }
     }
   }
+
+  private locationItem(location: ResolvedLocation): vscode.TreeItem {
+    const item = new vscode.TreeItem(location.label, vscode.TreeItemCollapsibleState.Expanded);
+    let origin = '';
+    if (location.origin === 'nested') origin = `nested · ${location.appliesTo}/ · `;
+    else if (location.origin === 'parent') origin = 'parent folder · ';
+    item.description = origin + this.service.agentNames(location.readers, '', ' · ');
+    item.iconPath = new vscode.ThemeIcon(location.readOnly ? 'lock' : 'folder-library');
+
+    const tooltip = new vscode.MarkdownString();
+    tooltip.supportThemeIcons = true;
+    tooltip.appendMarkdown(`**${escapeMarkdown(location.label)}**\n\n`);
+    tooltip.appendMarkdown(`Loaded by: ${this.service.agentNames(location.readers, '')}\n\n`);
+    tooltip.appendText(location.path);
+    if (location.origin === 'nested') {
+      const subfolder = escapeMarkdown(location.appliesTo ?? '');
+      tooltip.appendMarkdown(`\n\n$(info) Nested: agents load these when they work on files under ${subfolder}/ (Claude Code namespaces them as /${subfolder}:name).`);
+    }
+    if (location.origin === 'parent') tooltip.appendMarkdown('\n\n$(info) Above the workspace folder, inside the same git repository.');
+    if (location.skippedSynced) {
+      tooltip.appendMarkdown(`\n\n$(info) ${location.skippedSynced} skill(s) synced for another claude.ai account are not listed: Claude Code only loads the signed-in account's skills.`);
+    }
+    if (location.readOnly) tooltip.appendMarkdown(`\n\n$(lock) Read-only: ${escapeMarkdown(location.readOnlyReason ?? '')}`);
+    if (location.ignoredEntries.length) tooltip.appendMarkdown(`\n\n$(info) Ignored by agents (no SKILL.md): ${location.ignoredEntries.map(escapeMarkdown).join(', ')}`);
+    item.tooltip = tooltip;
+    item.contextValue = 'location';
+    item.resourceUri = vscode.Uri.file(location.path);
+    return item;
+  }
+
+  private skillIcon(skill: SkillRecord, errorCount: number, warningCount: number, hasUpdate: boolean): vscode.ThemeIcon {
+    if (errorCount) return new vscode.ThemeIcon('error', new vscode.ThemeColor('list.errorForeground'));
+    if (warningCount) return new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'));
+    if (hasUpdate) return new vscode.ThemeIcon('arrow-circle-up', new vscode.ThemeColor('charts.blue'));
+    return new vscode.ThemeIcon(skill.isSymlink ? 'file-symlink-directory' : 'book');
+  }
+
+  /** `skill` or `skill-readonly`, plus flags the menus in package.json match on (+update, +fix, +global, +dup). */
+  private skillContextValue(skill: SkillRecord, hasUpdate: boolean): string {
+    const canFix = fixesFor(skill, this.service.location(skill.locationId)).length > 0;
+    const canUpdate = hasUpdate && !skill.readOnly && !skill.isSymlink;
+    const isDuplicate = skill.issues.some((issue) => issue.code.startsWith('duplicate:'));
+    let value = skill.readOnly ? 'skill-readonly' : 'skill';
+    if (canUpdate) value += '+update';
+    if (canFix) value += '+fix';
+    if (skill.scope !== 'workspace') value += '+global';
+    if (isDuplicate) value += '+dup';
+    return value;
+  }
+
+  private skillItem(node: Extract<Node, { kind: 'skill' }>): vscode.TreeItem {
+    const skill = node.skill;
+    const item = new vscode.TreeItem(skill.name, vscode.TreeItemCollapsibleState.None);
+    const errorCount = skill.issues.filter((issue) => issue.severity === 'error').length;
+    const warningCount = skill.issues.filter((issue) => issue.severity === 'warning').length;
+    const update = this.service.updateFor(skill);
+    const hasUpdate = update?.status === 'update-available';
+
+    const flags: string[] = [];
+    if (hasUpdate) flags.push('update available');
+    if (skill.isSymlink) flags.push('link');
+    if (skill.readOnly) flags.push('read-only');
+    if (errorCount) flags.push(countLabel(errorCount, 'error'));
+    else if (warningCount) flags.push(countLabel(warningCount, 'warning'));
+    item.description = flags.join(' · ');
+    item.iconPath = this.skillIcon(skill, errorCount, warningCount, hasUpdate);
+
+    const tooltip = new vscode.MarkdownString();
+    tooltip.supportThemeIcons = true;
+    tooltip.appendMarkdown(`**${escapeMarkdown(skill.name)}**\n\n`);
+    if (skill.description) {
+      const ellipsis = skill.description.length > MAX_TOOLTIP_DESCRIPTION ? '…' : '';
+      tooltip.appendText(skill.description.slice(0, MAX_TOOLTIP_DESCRIPTION) + ellipsis + '\n\n');
+    }
+    tooltip.appendMarkdown(`Visible to: ${this.service.agentNames(skill.visibleTo, '—')}\n\n`);
+    if (hasUpdate) {
+      const commit = update?.remoteCommit ? ` (${update.remoteCommit.slice(0, SHORT_COMMIT_LENGTH)})` : '';
+      tooltip.appendMarkdown(`$(arrow-circle-up) Update available${commit}\n\n`);
+    }
+    for (const issue of skill.issues.slice(0, MAX_TOOLTIP_ISSUES)) tooltip.appendMarkdown(`${SEVERITY_ICON[issue.severity]} ${escapeMarkdown(issue.message)}\n\n`);
+    item.tooltip = tooltip;
+    item.contextValue = this.skillContextValue(skill, hasUpdate);
+    item.id = skill.id;
+    item.command = { command: 'skillsManager.showInDashboard', title: 'Show details', arguments: [node] };
+    return item;
+  }
 }
 
 /** Extracts a skill id from a tree node or a raw id passed by the webview/command palette. */
-export function skillIdFrom(arg: unknown): string | undefined {
-  if (typeof arg === 'string') return arg;
-  if (arg && typeof arg === 'object' && (arg as Node).kind === 'skill') return (arg as { skill: SkillRecord }).skill.id;
-  return undefined;
-}
-
-function escapeMd(s: string): string {
-  return s.replace(/[\\`*_{}[\]()#+\-.!|<>]/g, '\\$&');
+export function skillIdFrom(argument: unknown): string | undefined {
+  if (typeof argument === 'string') return argument;
+  const isSkillNode = !!argument && typeof argument === 'object' && (argument as Node).kind === 'skill';
+  return isSkillNode ? (argument as { skill: SkillRecord }).skill.id : undefined;
 }
