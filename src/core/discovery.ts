@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { parseFrontmatter } from './frontmatter';
 import { pathKey, tildify } from './paths';
+import { contentFingerprint } from './hashing';
 import { expandContext } from './monorepo';
 import { trackedFromGhFrontmatter } from './provenance';
 import { validateSkill } from './validate';
@@ -274,12 +275,23 @@ async function scanManaged(
   loc: ResolvedLocation,
   opts: DiscoverOptions,
   depth: number,
+  activeBucket?: string,
 ): Promise<SkillRecord[]> {
   const out: SkillRecord[] = [];
   const sub = await fs.readdir(dir, { withFileTypes: true }).catch(() => [] as Dirent[]);
   for (const s of sub) {
     if (s.name.startsWith('.') || (!s.isDirectory() && !s.isSymbolicLink())) continue;
     const p = path.join(dir, s.name);
+    if (managed === 'synced' && activeBucket && s.name.toLowerCase() === activeBucket.toLowerCase()) {
+      loc.activeSyncBucket = { bucket: s.name, lastSynced: await manifestDate(p) };
+    }
+    // Claude Code syncs "your account's skills": a bucket of another account is a leftover.
+    if (managed === 'synced' && activeBucket && BUCKET_RE.test(s.name) && s.name.toLowerCase() !== activeBucket.toLowerCase()) {
+      const left = await scanManaged(p, managed, reason, loc, opts, depth - 1);
+      loc.skippedSynced = (loc.skippedSynced ?? 0) + left.length;
+      (loc.skippedSyncedBuckets ??= []).push({ bucket: s.name, path: p, skills: left.map((x) => x.name).sort(), lastSynced: await manifestDate(p) });
+      continue;
+    }
     const rec = await readSkill(p, s.name, loc, { readOnly: true, readOnlyReason: reason }, opts).catch(() => 'not-a-skill' as const);
     if (rec !== 'not-a-skill') out.push({ ...rec, managed });
     else if (depth > 1 && s.isDirectory()) out.push(...(await scanManaged(p, managed, reason, loc, opts, depth - 1)));
@@ -287,7 +299,36 @@ async function scanManaged(
   return out;
 }
 
-async function scanLocation(loc: ResolvedLocation, opts: DiscoverOptions): Promise<SkillRecord[]> {
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const BUCKET_RE = new RegExp(`^${UUID}_${UUID}$`, 'i');
+
+/**
+ * `<organizationUuid>_<accountUuid>` of the claude.ai account Claude Code is
+ * signed in with, read from ~/.claude.json (only those two fields). The synced
+ * bucket names use this format (observed 2026-10-18; not documented).
+ */
+/** `lastUpdated` (epoch ms) from a synced bucket's manifest.json; undefined if absent or odd. */
+async function manifestDate(bucketDir: string): Promise<string | undefined> {
+  try {
+    const m = JSON.parse(await fs.readFile(path.join(bucketDir, 'manifest.json'), 'utf8')) as { lastUpdated?: unknown };
+    return typeof m.lastUpdated === 'number' && Number.isFinite(m.lastUpdated) ? new Date(m.lastUpdated).toISOString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function readClaudeSyncBucket(homeDir: string): Promise<string | undefined> {
+  try {
+    const raw = await fs.readFile(path.join(homeDir, '.claude.json'), 'utf8');
+    const acct = (JSON.parse(raw) as { oauthAccount?: { organizationUuid?: unknown; accountUuid?: unknown } }).oauthAccount;
+    const bucket = `${acct?.organizationUuid}_${acct?.accountUuid}`;
+    return BUCKET_RE.test(bucket) ? bucket.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function scanLocation(loc: ResolvedLocation, opts: DiscoverOptions, ctx: DiscoveryContext): Promise<SkillRecord[]> {
   const st = await statOrNull(loc.path);
   if (!st || !st.isDirectory()) return [];
   loc.exists = true;
@@ -307,7 +348,7 @@ async function scanLocation(loc: ResolvedLocation, opts: DiscoverOptions): Promi
     }
     const managedReason = loc.managedSubdirs?.[entry.name];
     if (managedReason) {
-      out.push(...(await scanManaged(entryPath, entry.name, managedReason, loc, opts, 2)));
+      out.push(...(await scanManaged(entryPath, entry.name, managedReason, loc, opts, 2, ctx.claudeSyncBucket)));
       continue;
     }
     const rec = await readSkill(entryPath, entry.name, loc, { readOnly: loc.readOnly, readOnlyReason: loc.readOnlyReason }, opts).catch(
@@ -360,6 +401,17 @@ export function annotateConflicts(skills: SkillRecord[], adapters: ProviderAdapt
         }
         continue;
       }
+      const ids = new Set(list.map((s) => s.contentId));
+      if (ids.size === 1 && list[0].contentId) {
+        for (const s of list) {
+          addIssueOnce(s, {
+            severity: 'info',
+            code: 'identical-copies',
+            message: `${a.displayName} sees ${distinctReal.size} identical copies of "${name}"; whichever it picks, the content is the same.`,
+          });
+        }
+        continue;
+      }
       dupes.push(name);
       const where = list.map((s) => locById.get(s.locationId)?.label ?? s.dir).join(', ');
       for (const s of list) {
@@ -389,8 +441,18 @@ function addIssueOnce(s: SkillRecord, issue: Issue) {
 export async function discover(ctx: DiscoveryContext, adapters: ProviderAdapter[], opts: DiscoverOptions = {}): Promise<DiscoveryResult> {
   if (opts.monorepo) ctx = await expandContext(ctx, opts.monorepo);
   const locations = resolveLocations(ctx, adapters, opts);
-  const perLocation = await Promise.all(locations.map((l) => scanLocation(l, opts)));
+  const perLocation = await Promise.all(locations.map((l) => scanLocation(l, opts, ctx)));
   const skills = perLocation.flat();
+  // Fingerprint only skills whose name repeats: identical copies are not a real conflict.
+  const count = new Map<string, number>();
+  for (const s of skills) count.set(s.name, (count.get(s.name) ?? 0) + 1);
+  await Promise.all(
+    skills
+      .filter((s) => (count.get(s.name) ?? 0) > 1 && !s.issues.some((i) => i.code === 'broken-symlink'))
+      .map(async (s) => {
+        s.contentId = await contentFingerprint(s.realDir).catch(() => undefined);
+      }),
+  );
   const providers = annotateConflicts(skills, adapters, locations);
   return { scannedAt: new Date().toISOString(), context: ctx, locations, skills, providers };
 }

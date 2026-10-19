@@ -1,11 +1,11 @@
-import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { createHash } from 'node:crypto';
 import { GitHubClient } from './github';
 import { DEFAULT_LIMITS, InstallLimits, inspectResolved, RepoInspection, selectFiles, stageCandidates, StagedSkill } from './installer';
+import { localFileShas } from './hashing';
 import { TrackedSource, UserError } from './types';
 
 export { trackedFromGhFrontmatter, trackedFromLock } from './provenance';
+export { gitBlobSha, localFileShas } from './hashing';
 
 /**
  * Update Manager. An update exists when the tree SHA of the same sub-folder at
@@ -115,11 +115,6 @@ export function isEmptyDiff(d: FileDiff): boolean {
   return d.added.length + d.modified.length + d.removed.length === 0;
 }
 
-/** Git blob id of some bytes (what `git hash-object` prints). */
-export function gitBlobSha(buf: Uint8Array): string {
-  return createHash('sha1').update(`blob ${buf.byteLength}\0`).update(buf).digest('hex');
-}
-
 export function diffFiles(from: Map<string, string>, to: Map<string, string>): FileDiff {
   const d: FileDiff = { added: [], modified: [], removed: [] };
   for (const [p, sha] of to) {
@@ -130,23 +125,6 @@ export function diffFiles(from: Map<string, string>, to: Map<string, string>): F
   for (const p of from.keys()) if (!to.has(p)) d.removed.push(p);
   for (const k of ['added', 'modified', 'removed'] as const) d[k].sort();
   return d;
-}
-
-/** Relative POSIX path → git blob SHA for every regular file under `dir`. Symlinks inside the skill are not followed. */
-export async function localFileShas(dir: string, maxFiles = 2000): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
-  const walk = async (d: string, rel: string): Promise<void> => {
-    const entries = await fs.readdir(d, { withFileTypes: true });
-    for (const e of entries) {
-      if (out.size >= maxFiles) throw new UserError(`More than ${maxFiles} files in ${dir}.`);
-      const r = rel ? `${rel}/${e.name}` : e.name;
-      const p = path.join(d, e.name);
-      if (e.isDirectory()) await walk(p, r);
-      else if (e.isFile()) out.set(r, gitBlobSha(await fs.readFile(p)));
-    }
-  };
-  await walk(dir, '');
-  return out;
 }
 
 /** Files (path → blob SHA) of a GitHub tree, filtered exactly like an install would. */

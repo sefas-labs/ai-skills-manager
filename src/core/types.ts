@@ -38,6 +38,15 @@ export interface ReadLocation {
   appliesTo?: string;
 }
 
+export interface SkippedSyncBucket {
+  /** Folder name: `<organizationUuid>_<accountUuid>`. */
+  bucket: string;
+  path: string;
+  skills: string[];
+  /** From the bucket's manifest.json, when readable. */
+  lastSynced?: string;
+}
+
 export interface DiscoveryContext {
   homeDir: string;
   workspaceFolders: string[];
@@ -48,6 +57,8 @@ export interface DiscoveryContext {
   nestedDirs?: Record<string, string[]>;
   /** VS Code `chat.useCustomizationsInParentRepositories`. */
   copilotParentRepo?: boolean;
+  /** `<org>_<account>` of the signed-in claude.ai account: other accounts' synced buckets are skipped. */
+  claudeSyncBucket?: string;
 }
 
 export interface ProviderAdapter {
@@ -80,6 +91,12 @@ export interface ResolvedLocation {
   skillCount: number;
   /** Entries in the folder that agents will ignore (no SKILL.md, etc). */
   ignoredEntries: string[];
+  /** Skills synced for other claude.ai accounts, not loaded by Claude Code and not listed. */
+  skippedSynced?: number;
+  /** Detail of those leftovers, one entry per other-account bucket. */
+  skippedSyncedBuckets?: SkippedSyncBucket[];
+  /** The signed-in account's bucket, when known. */
+  activeSyncBucket?: { bucket: string; lastSynced?: string };
 }
 
 export interface GitHubSource {
@@ -136,6 +153,8 @@ export interface SkillRecord {
   readOnlyReason?: string;
   /** Name of the managed sub-folder it was found in (e.g. 'synced'). */
   managed?: string;
+  /** Content fingerprint, computed only when another folder has a skill with the same name. */
+  contentId?: string;
   source?: LockEntry;
   /** Hint found in frontmatter metadata (e.g. written by `gh skill`). */
   sourceHint?: string;
