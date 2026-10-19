@@ -142,6 +142,89 @@ export function skillRow(sk: ViewSkill, child: boolean): Node {
   );
 }
 
+/** Where a skill came from, when it arrived with others: a plugin, claude.ai, Cursor, a GitHub repo or a category folder. */
+export interface Bundle {
+  key: string;
+  title: string;
+  kind: string;
+  icon: string;
+}
+
+export function bundleOf(sk: ViewSkill): Bundle | undefined {
+  if (sk.namespace) {
+    const synced = sk.locationLabel.startsWith('claude.ai plugin');
+    return { key: `plugin:${sk.namespace}`, title: sk.namespace, kind: synced ? 'claude.ai plugin' : 'Claude Code plugin', icon: 'extensions' };
+  }
+  const cursorPlugin = /^Cursor plugin (.+) \(local\)$/.exec(sk.locationLabel);
+  if (cursorPlugin) return { key: `cursor-plugin:${cursorPlugin[1]}`, title: cursorPlugin[1], kind: 'Cursor plugin', icon: 'extensions' };
+  if (sk.locationLabel === 'Cursor built-in skills') return { key: 'cursor-builtin', title: 'Cursor built-in', kind: 'Ships with Cursor', icon: 'package' };
+  if (sk.managed === 'synced') return { key: 'claude-ai', title: 'claude.ai', kind: 'Synced from your account', icon: 'cloud' };
+  const repo = sk.source && /^https:\/\/github\.com\/([^/]+\/[^/]+)/.exec(sk.source.url)?.[1];
+  if (repo) return { key: `gh:${repo.toLowerCase()}:${sk.scope}`, title: repo, kind: 'Installed from GitHub', icon: 'github' };
+  if (sk.group) return { key: `group:${sk.locationId}:${sk.group}`, title: `${sk.group}/`, kind: `Category folder in ${sk.locationLabel}`, icon: 'folder' };
+  return undefined;
+}
+
+/** Rows for a list of skills: same name in several folders → one expandable copies group. */
+function nameRows(items: ViewSkill[]): Node[] {
+  const groups = new Map<string, ViewSkill[]>();
+  for (const sk of items) groups.set(qname(sk), [...(groups.get(qname(sk)) ?? []), sk]);
+  return [...groups.values()].map((copies) => (copies.length === 1 ? skillRow(copies[0], false) : groupRows(copies)));
+}
+
+export function bundleRows(b: Bundle, items: ViewSkill[], refill: () => void): Node {
+  const open = !!persisted.q.trim() || (persisted.openBundles ?? []).includes(b.key) || items.some((c) => c.id === persisted.selected);
+  const worst = worstOf(items);
+  const union = [...new Set(items.flatMap((c) => c.visibleTo))];
+  const names = [...new Set(items.map((c) => c.name))];
+  const toggle = () => {
+    const set = new Set(persisted.openBundles ?? []);
+    if (open) {
+      set.delete(b.key);
+      if (items.some((c) => c.id === persisted.selected)) persisted.selected = undefined;
+    } else set.add(b.key);
+    persisted.openBundles = [...set];
+    save();
+    if (persisted.selected === undefined) render();
+    else refill();
+  };
+  return h(
+    'div',
+    { class: `bundle ${open ? 'open' : ''}` },
+    h(
+      'button',
+      { class: 'row bundle-head', type: 'button', 'aria-expanded': open ? 'true' : 'false', onClick: toggle },
+      h(
+        'div',
+        { class: 'row-head' },
+        icon(open ? 'chevron-down' : 'chevron-right', 'chev'),
+        icon(b.icon),
+        worst ? sevIcon(worst) : null,
+        h('span', { class: 'name' }, b.title),
+        chip(`${names.length} skill${names.length === 1 ? '' : 's'}`, 'subtle'),
+        h('span', { class: 'small muted' }, b.kind),
+      ),
+      open ? null : h('div', { class: 'desc muted' }, names.slice(0, 6).join(' · ') + (names.length > 6 ? ` · +${names.length - 6} more` : '')),
+      h('div', { class: 'row-foot' }, h('span', { class: 'mono small muted loc' }, [...new Set(items.map((c) => c.locationLabel))].join(' · ')), agentDots(union)),
+    ),
+    open ? h('div', { class: 'bundle-children' }, nameRows(items)) : null,
+  );
+}
+
+/** Skills in display order: your own first, then one bundle per source. */
+export function listLayout(items: ViewSkill[]): { loose: ViewSkill[]; bundles: Array<[Bundle, ViewSkill[]]> } {
+  if (persisted.flatList) return { loose: items, bundles: [] };
+  const by = new Map<string, [Bundle, ViewSkill[]]>();
+  for (const sk of items) {
+    const b = bundleOf(sk);
+    if (b) by.set(b.key, [by.get(b.key)?.[0] ?? b, [...(by.get(b.key)?.[1] ?? []), sk]]);
+  }
+  // A source with a single skill isn't worth a level of nesting.
+  const bundles = [...by.values()].filter(([, list]) => list.length > 1).sort((a, b) => a[0].title.localeCompare(b[0].title));
+  const inBundle = new Set(bundles.flatMap(([, list]) => list.map((s) => s.id)));
+  return { loose: items.filter((s) => !inBundle.has(s.id)), bundles };
+}
+
 export function groupRows(copies: ViewSkill[]): Node {
   const name = copies[0].name;
   const open = expandedGroups.has(name) || copies.some((c) => c.id === persisted.selected);
@@ -263,12 +346,18 @@ export function skillsView(t: SkillsTab): Node {
   const listEl = h('div', { class: 'list', 'aria-label': 'Skills', 'data-scroll-key': `list-${t}` });
   const fillList = () => {
     const items = filtered(t);
-    // Same name in several folders → one expandable group (see "Copies" in the ui.detail).
-    const groups = new Map<string, ViewSkill[]>();
-    for (const sk of items) groups.set(qname(sk), [...(groups.get(qname(sk)) ?? []), sk]);
+    // Skills that came together (a plugin, claude.ai, a repo) collapse into one bundle;
+    // the same name in several folders → one expandable copies group (see "Copies" in the detail).
+    const { loose, bundles } = listLayout(items);
+    const label = (text: string) => h('div', { class: 'list-label small muted' }, text);
     listEl.replaceChildren(
       ...(items.length
-        ? [...groups.values()].map((copies) => (copies.length === 1 ? skillRow(copies[0], false) : groupRows(copies)))
+        ? [
+            ...(bundles.length && loose.length ? [label('Your skills')] : []),
+            ...nameRows(loose),
+            ...(bundles.length ? [label(`From plugins & sources · ${bundles.length}`)] : []),
+            ...bundles.map(([b, list]) => bundleRows(b, list, fillList)),
+          ]
         : [h('p', { class: 'muted pad' }, 'No skills match these filters.')]),
     );
   };
@@ -292,6 +381,18 @@ export function skillsView(t: SkillsTab): Node {
     }),
     select(persisted.provider, [['all', 'All agents'], ...shown().map((p) => [p.id, p.displayName] as [string, string])], (v) => ((persisted.provider = v), save(), fillList()), 'Agent'),
     select(persisted.status, [['all', 'Any status'], ['problems', 'With problems'], ['links', 'Symlinks'], ['readonly', 'Read-only'], ['github', 'From GitHub (tracked)'], ['updates', 'Updates available']], (v) => ((persisted.status = v), save(), fillList()), 'Status'),
+    h(
+      'button',
+      {
+        class: `btn link icon-only ${persisted.flatList ? '' : 'active'}`,
+        type: 'button',
+        title: persisted.flatList ? 'Group by source (plugins, claude.ai, repos)' : 'Show every skill on its own',
+        'aria-label': 'Group by source',
+        'aria-pressed': persisted.flatList ? 'false' : 'true',
+        onClick: () => ((persisted.flatList = !persisted.flatList), save(), render()),
+      },
+      icon(persisted.flatList ? 'list-flat' : 'list-tree'),
+    ),
   );
 
   // One selection for both tabs; only shown in the tab it belongs to. On wide
@@ -299,7 +400,8 @@ export function skillsView(t: SkillsTab): Node {
   let selected = inTab(t).find((x) => x.id === persisted.selected);
   if (!selected && wideLayout() && !autoPicked.has(t)) {
     autoPicked.add(t);
-    selected = filtered(t)[0];
+    const { loose, bundles } = listLayout(filtered(t));
+    selected = loose[0] ?? bundles[0]?.[1][0];
     if (selected) {
       persisted.selected = selected.id;
       save();

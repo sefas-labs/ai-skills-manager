@@ -120,6 +120,7 @@ Bugs corregidos:
   - **MCP — Add server…:** stdio (comando + argumentos) o HTTP (solo `https://`, o `http://` en localhost), con la forma de entrada documentada por cada agente: Claude y VS Code `type: stdio|http`; Cursor `type: stdio` y `url` sin `type`; Copilot CLI `type: local|http` + `tools: ["*"]`; Codex `[mcp_servers.<name>]`. El modal muestra la entrada exacta y avisa de que el agente ejecutará ese comando.
   - **MCP — quitar** un servidor (JSON y TOML, solo su tabla y subtablas) y **activar/desactivar** en Codex (`enabled = false`, el único agente que lo documenta en archivo).
   - No se escribe `~/.claude.json` (Claude Code lo reescribe; se remite a `claude mcp add/remove`) ni archivos JSON con comentarios (se perderían).
+- **Lista de skills agrupada por origen:** los skills que llegaron juntos se pliegan en un bloque desplegable: cada plugin de Claude Code o de claude.ai, los sincronizados de claude.ai, los integrados y los plugins locales de Cursor, cada repo de GitHub instalado y cada carpeta de categoría de Cursor. El bloque muestra cuántos trae, los nombres, sus carpetas y qué agentes los ven. Primero van *Your skills* y luego los bloques. Un origen con un solo skill no se agrupa; al buscar, los bloques se abren. El botón junto a los filtros alterna con la lista plana.
 - `npm run test:e2e`: ejecuta la extensión dentro de VS Code o Cursor reales, con un perfil temporal y un proxy local.
 
 ## 0.1.0 — 2026-10-18

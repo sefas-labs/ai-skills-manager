@@ -251,3 +251,22 @@ test('install step 3: two recommended destinations, other folders only on reques
   assert.ok(rows.some((r) => r.includes('.agents/skills')), 'existing folders are offered');
   assert.ok(!rows.some((r) => r.includes('.codex/skills')), 'a new folder that adds no installed agent is not offered');
 });
+
+test('skills list: skills from the same plugin / source collapse into one bundle', () => {
+  const { doc, post, click, errors } = mount({ tab: 'global', selected: 'g2' });
+  const state = fixture();
+  const plug = (id, name) => skill(id, name, 'pl', 'plugin agent-skills', 'global', ['claude-code'], { namespace: 'agent-skills', readOnly: true });
+  state.skills.push(plug('a1', 'tdd'), plug('a2', 'debugging'), plug('a3', 'code-review'), skill('g3', 'pdf', 'gc', '~/.claude/skills', 'global', ['claude-code'], { readOnly: true, managed: 'synced' }));
+  post({ type: 'state', state });
+  assert.deepEqual(errors(), []);
+  const heads = () => [...doc.querySelectorAll('.bundle-head .name')].map((n) => n.textContent);
+  assert.deepEqual(heads(), ['agent-skills', 'claude.ai'], 'one bundle per source; the single "dev" plugin skill stays loose');
+  assert.match(doc.querySelector('.bundle').textContent, /3 skills.*code-review · debugging · tdd/s);
+  assert.equal(doc.querySelectorAll('.bundle-children').length, 0, 'collapsed by default');
+  click(/agent-skills/);
+  assert.equal(doc.querySelectorAll('.bundle.open .bundle-children .row').length, 3);
+  // Flat list toggle.
+  doc.querySelector('[aria-label="Group by source"]').click();
+  assert.deepEqual(heads(), []);
+  assert.ok(doc.body.textContent.includes('code-review'));
+});

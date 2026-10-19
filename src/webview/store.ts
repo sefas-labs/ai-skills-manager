@@ -33,6 +33,10 @@ export interface Persisted {
   installMode?: 'browse' | 'url';
   catalogSource?: string;
   catalogQ?: string;
+  /** Source bundles (plugins, claude.ai, collections) expanded in the skills list. */
+  openBundles?: string[];
+  /** Show every skill on its own instead of grouped by where it came from. */
+  flatList?: boolean;
 }
 
 export const persisted: Persisted = { tab: 'overview', q: '', provider: 'all', status: 'all', url: '', ...((api.getState() as Partial<Persisted>) ?? {}) };

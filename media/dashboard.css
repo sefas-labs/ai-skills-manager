@@ -456,3 +456,11 @@ details.merges[open] > summary { margin-bottom: 8px; }
 .cfg-actions { margin-left: auto; }
 .cfg-servers td.cfg-row-actions { width: 64px; text-align: right; white-space: nowrap; }
 .config .panel h2 { display: flex; align-items: center; gap: 6px; }
+.bundle { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+.bundle > .row.bundle-head { border: 0; background: transparent; }
+.bundle > .row.bundle-head:hover { background: var(--vscode-list-hoverBackground); }
+.bundle .chev { color: var(--muted); }
+.bundle-children { display: flex; flex-direction: column; gap: 4px; padding: 0 8px 8px 22px; border-left: 2px solid var(--border); margin-left: 14px; }
+.list-label { padding: 8px 2px 2px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; font-size: 0.78em; }
+.list-label:first-child { padding-top: 0; }
+.btn.icon-only.active { color: var(--vscode-textLink-foreground); }
