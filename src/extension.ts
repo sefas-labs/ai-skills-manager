@@ -4,6 +4,8 @@ import { confirmAndUninstall, copySkillPath, getGitHubToken, openSkillFile, reve
 import { DashboardPanel } from './ui/dashboard';
 import { SkillsService } from './ui/service';
 import { skillIdFrom, SkillsTreeProvider } from './ui/tree';
+import { chooseCopy } from './ui/choose';
+import { fixSkill } from './ui/fixes';
 import { copyOrMoveSkill } from './ui/transfer';
 import { checkForUpdates, confirmAndUpdate } from './ui/updates';
 
@@ -12,6 +14,7 @@ export interface InternalApi {
   service: SkillsService;
   tree: SkillsTreeProvider;
   dashboardReady(): boolean;
+  dashboardError(): string | undefined;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<InternalApi> {
@@ -79,6 +82,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<Intern
     const id = skillIdFrom(arg);
     if (id) return copyOrMoveSkill(service, id);
   });
+  cmd('skillsManager.fixSkill', (arg) => {
+    const id = skillIdFrom(arg);
+    if (id) return fixSkill(service, id);
+  });
+  cmd('skillsManager.chooseCopy', (arg) => {
+    const id = skillIdFrom(arg);
+    if (id) return chooseCopy(service, id);
+  });
+  cmd('skillsManager.addToProject', (arg) => {
+    const id = skillIdFrom(arg);
+    if (id) return copyOrMoveSkill(service, id, { toProject: true });
+  });
   cmd('skillsManager.checkUpdates', () => checkForUpdates(service, true));
   cmd('skillsManager.updateSkill', (arg) => {
     const id = skillIdFrom(arg);
@@ -101,7 +116,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Intern
       if (vscode.workspace.getConfiguration('skillsManager').get<boolean>('checkForUpdatesOnStartup')) return checkForUpdates(service, false);
     })
     .catch((e) => console.error('[skills-manager] initial scan failed', e));
-  return { service, tree, dashboardReady: () => DashboardPanel.current?.isReady ?? false };
+  return { service, tree, dashboardReady: () => DashboardPanel.current?.isReady ?? false, dashboardError: () => DashboardPanel.current?.lastClientError };
 }
 
 export function deactivate(): void {

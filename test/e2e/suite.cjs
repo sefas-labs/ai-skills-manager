@@ -53,6 +53,8 @@ exports.run = async function run() {
 
     await vscode.commands.executeCommand('skillsManager.openDashboard');
     check('dashboard webview runs under CSP and sends ready', await waitFor(() => api.dashboardReady()));
+    await sleep(1500);
+    check('dashboard renders without errors', !api.dashboardError(), api.dashboardError());
 
     await vscode.commands.executeCommand('skillsManager.checkUpdates');
     const byName = (n) => api.service.current.skills.find((s) => s.name === n);
@@ -64,7 +66,26 @@ exports.run = async function run() {
     const staleItem = (() => {
       for (const sc of api.tree.getChildren()) for (const l of api.tree.getChildren(sc)) for (const n of api.tree.getChildren(l)) if (n.kind === 'skill' && n.skill.name === 'pdf-stale') return api.tree.getTreeItem(n);
     })();
-    check('tree marks the skill with an update', staleItem && /\+update$/.test(staleItem.contextValue) && /update available/.test(staleItem.description), staleItem && staleItem.description);
+    check('tree marks the skill with an update', staleItem && /\+update/.test(staleItem.contextValue) && /update available/.test(staleItem.description), staleItem && staleItem.description);
+
+    report.host = { appName: vscode.env.appName, agent: api.service.hostAgent };
+    report.agents = Object.fromEntries(Object.entries(api.service.agents).map(([k, v]) => [k, v.installed ? v.evidence : 'not detected']));
+    check('host agent recognised', api.service.hostAgent === (/cursor/i.test(vscode.env.appName) ? 'cursor' : 'copilot'), api.service.hostAgent);
+    check('host agent detected as installed', api.service.agents[api.service.hostAgent]?.installed);
+
+    const globalItem = (() => {
+      for (const sc of api.tree.getChildren()) if (sc.scope === 'global') for (const l of api.tree.getChildren(sc)) for (const n of api.tree.getChildren(l)) if (n.kind === 'skill') return api.tree.getTreeItem(n);
+    })();
+    check('global skills offer Add to Project', !globalItem || /\+global/.test(globalItem.contextValue), globalItem && globalItem.contextValue);
+    const merge = api.service.merges.find((m) => m.name === 'e2e-skill');
+    check('merge suggestion: Cursor-only copy is redundant', merge && merge.verdict === 'remove-redundant' && merge.remove.length === 1, merge && { verdict: merge.verdict, remove: merge.remove.length });
+    const broken = api.service.current.skills.find((x) => x.dirName === 'needs-fix');
+    const view = api.service.viewState().skills.find((x) => x.dirName === 'needs-fix');
+    check('fixes offered for a name mismatch', view && view.fixes.some((f) => f.id === 'set-name-to-folder'), view && view.fixes.map((f) => f.id));
+    const brokenItem = (() => {
+      for (const sc of api.tree.getChildren()) for (const l of api.tree.getChildren(sc)) for (const n of api.tree.getChildren(l)) if (n.kind === 'skill' && n.skill.id === broken.id) return api.tree.getTreeItem(n);
+    })();
+    check('tree offers Fix on it', brokenItem && /\+fix/.test(brokenItem.contextValue), brokenItem && brokenItem.contextValue);
 
     const ghAuth = vscode.extensions.getExtension('vscode.github-authentication');
     report.githubAuthExtension = !!ghAuth;

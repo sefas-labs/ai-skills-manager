@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { discover, DiscoverOptions } from '../core/discovery';
+import { detectAgents, hostAgentFor, type AgentDetection } from '../core/agents';
+import { discover, DiscoverOptions, readClaudeSyncBucket } from '../core/discovery';
+import { fixesFor } from '../core/fixes';
+import { mergeSuggestions, type MergeSuggestion } from '../core/merge';
 import { LockStore } from '../core/lockfile';
 import { BUILTIN_PROVIDERS } from '../core/providers';
 import { pathKey, tildify } from '../core/paths';
@@ -9,6 +12,8 @@ import { trackedFromLock } from '../core/provenance';
 import { basisOf, type UpdateCheck } from '../core/updates';
 import type { DiscoveryContext, DiscoveryResult, ProviderAdapter, ReadLocation, ResolvedLocation, SkillRecord, TrackedSource } from '../core/types';
 import type { ViewSkill, ViewState } from '../shared/protocol';
+
+declare const __BUILD_ID__: string;
 
 /** Owns the current scan result, file watching and storage paths. */
 export class SkillsService implements vscode.Disposable {
@@ -23,6 +28,9 @@ export class SkillsService implements vscode.Disposable {
   githubSignedIn = false;
   private updates: Record<string, UpdateCheck>;
   updatesCheckedAt: string | undefined;
+  agents: Record<string, AgentDetection> = {};
+  merges: MergeSuggestion[] = [];
+  readonly hostAgent = hostAgentFor(vscode.env.appName);
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.lock = new LockStore(path.join(this.storageDir, 'skills-lock.json'));
@@ -99,8 +107,24 @@ export class SkillsService implements vscode.Disposable {
     if (this.refreshing) return this.refreshing;
     this.refreshing = (async () => {
       await this.lock.load();
-      const ctx = this.context_();
-      const result = await discover(ctx, this.adapters(), this.options(ctx));
+      const ctx = { ...this.context_(), claudeSyncBucket: await readClaudeSyncBucket(os.homedir()) };
+      const adapters = this.adapters();
+      const [result, agents] = await Promise.all([
+        discover(ctx, adapters, this.options(ctx)),
+        detectAgents(
+          adapters.map((a) => a.id),
+          {
+            homeDir: ctx.homeDir,
+            platform: ctx.platform,
+            pathDirs: (process.env.PATH ?? '').split(path.delimiter).filter(Boolean),
+            extensionIds: vscode.extensions.all.map((e) => e.id),
+            hostAgent: this.hostAgent,
+          },
+        ).catch(() => ({}) as Record<string, AgentDetection>),
+      ]);
+      this.agents = agents;
+      const installed = Object.entries(agents).filter(([, a]) => a.installed).map(([id]) => id);
+      this.merges = await mergeSuggestions(result.skills, result.locations, { relevantAgents: installed }).catch(() => []);
       this.result = result;
       this.rewatch(result.locations);
       this.emitter.fire(result);
@@ -204,17 +228,36 @@ export class SkillsService implements vscode.Disposable {
       issues: s.issues,
       readOnly: s.readOnly,
       readOnlyReason: s.readOnlyReason,
+      managed: s.managed,
+      contentId: s.contentId,
       source: s.source
         ? { url: s.source.source.url, ref: s.source.source.ref, commit: s.source.source.commit, installedAt: s.source.installedAt }
         : undefined,
       sourceHint: s.sourceHint,
       tracked: this.tracked(s)?.origin,
+      fixes: fixesFor(s, this.location(s.locationId)).map(({ id, codes, label, detail }) => ({ id, codes, label, detail })),
       update: this.viewUpdate(s),
       skillMdLines: s.skillMdLines,
     }));
     return {
       scannedAt: r.scannedAt,
       updatesCheckedAt: this.updatesCheckedAt,
+      buildId: __BUILD_ID__,
+      host: { appName: vscode.env.appName, agentId: this.hostAgent },
+      agents: this.agents,
+      merges: this.merges.map((m) => ({
+        ...m,
+        copies: m.copies.map((c) => ({
+          skillId: c.skillId,
+          displayDir: tildify(c.dir, home),
+          locationLabel: c.locationLabel,
+          readers: c.readers,
+          writable: c.writable,
+          version: c.version,
+          modifiedAt: c.modifiedAt,
+          changedFiles: c.diff ? c.diff.added.length + c.diff.modified.length + c.diff.removed.length : 0,
+        })),
+      })),
       trusted: vscode.workspace.isTrusted,
       githubSignedIn: this.githubSignedIn,
       hasWorkspace: r.context.workspaceFolders.length > 0,

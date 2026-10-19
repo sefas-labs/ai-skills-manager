@@ -95,6 +95,18 @@
         "category": "AI Skills"
       },
       {
+        "command": "skillsManager.chooseCopy",
+        "title": "Use This Copy…",
+        "category": "AI Skills",
+        "icon": "$(pass)"
+      },
+      {
+        "command": "skillsManager.addToProject",
+        "title": "Add to Project…",
+        "category": "AI Skills",
+        "icon": "$(add)"
+      },
+      {
         "command": "skillsManager.copyMoveSkill",
         "title": "Copy or Move to…",
         "category": "AI Skills",
@@ -105,6 +117,12 @@
         "title": "Remove Skill…",
         "category": "AI Skills",
         "icon": "$(trash)"
+      },
+      {
+        "command": "skillsManager.fixSkill",
+        "title": "Fix Problems…",
+        "category": "AI Skills",
+        "icon": "$(wrench)"
       },
       {
         "command": "skillsManager.checkUpdates",
@@ -159,8 +177,13 @@
       ],
       "view/item/context": [
         {
+          "command": "skillsManager.fixSkill",
+          "when": "view == skillsManager.tree && viewItem =~ /\\+fix/",
+          "group": "inline@0"
+        },
+        {
           "command": "skillsManager.updateSkill",
-          "when": "view == skillsManager.tree && viewItem =~ /\\+update$/",
+          "when": "view == skillsManager.tree && viewItem =~ /\\+update/",
           "group": "inline@0"
         },
         {
@@ -170,7 +193,7 @@
         },
         {
           "command": "skillsManager.uninstall",
-          "when": "view == skillsManager.tree && viewItem =~ /^skill(\\+update)?$/",
+          "when": "view == skillsManager.tree && viewItem =~ /^skill(\\+|$)/",
           "group": "inline@2"
         },
         {
@@ -194,18 +217,33 @@
           "group": "2_copy@1"
         },
         {
+          "command": "skillsManager.chooseCopy",
+          "when": "view == skillsManager.tree && viewItem =~ /^skill\\+.*\\+dup/",
+          "group": "2_copy@0"
+        },
+        {
+          "command": "skillsManager.addToProject",
+          "when": "view == skillsManager.tree && workspaceFolderCount > 0 && viewItem =~ /\\+global/",
+          "group": "2_copy@1"
+        },
+        {
           "command": "skillsManager.copyMoveSkill",
           "when": "view == skillsManager.tree && viewItem =~ /^skill/",
           "group": "2_copy@2"
         },
         {
           "command": "skillsManager.uninstall",
-          "when": "view == skillsManager.tree && viewItem =~ /^skill(\\+update)?$/",
+          "when": "view == skillsManager.tree && viewItem =~ /^skill(\\+|$)/",
           "group": "9_remove@1"
         },
         {
           "command": "skillsManager.updateSkill",
-          "when": "view == skillsManager.tree && viewItem =~ /\\+update$/",
+          "when": "view == skillsManager.tree && viewItem =~ /\\+update/",
+          "group": "1_open@0"
+        },
+        {
+          "command": "skillsManager.fixSkill",
+          "when": "view == skillsManager.tree && viewItem =~ /\\+fix/",
           "group": "1_open@0"
         }
       ],
@@ -236,6 +274,18 @@
         },
         {
           "command": "skillsManager.copyMoveSkill",
+          "when": "false"
+        },
+        {
+          "command": "skillsManager.fixSkill",
+          "when": "false"
+        },
+        {
+          "command": "skillsManager.addToProject",
+          "when": "false"
+        },
+        {
+          "command": "skillsManager.chooseCopy",
           "when": "false"
         }
       ]
@@ -333,6 +383,7 @@
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "~1.90.0",
+    "@vscode/codicons": "0.0.45",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"

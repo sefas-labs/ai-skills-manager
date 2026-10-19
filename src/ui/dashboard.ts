@@ -16,9 +16,14 @@ import { worstSeverity } from '../core/inspector';
 import { parseFrontmatter } from '../core/frontmatter';
 import { isPathInside, safeJoin } from '../core/paths';
 import { UserError } from '../core/types';
+import type { FixId } from '../core/fixes';
 import type { HostToWebview, ViewInspection, WebviewToHost } from '../shared/protocol';
 import { confirmAndUninstall, copySkillPath, getGitHubToken, makeGitHubClient, openSkillFile, revealSkill } from './actions';
 import type { SkillsService } from './service';
+import { chooseCopy } from './choose';
+import { fixSkill } from './fixes';
+import { log } from './log';
+import { handleMerge } from './merge';
 import { copyOrMoveSkill } from './transfer';
 import { checkForUpdates, confirmAndUpdate } from './updates';
 
@@ -59,6 +64,9 @@ export class DashboardPanel implements vscode.Disposable {
     );
   }
 
+  /** Last render error reported by the webview, if any. */
+  lastClientError: string | undefined;
+
   /** True once the webview script ran under the CSP and sent 'ready'. */
   get isReady(): boolean {
     return this.ready;
@@ -88,6 +96,13 @@ export class DashboardPanel implements vscode.Disposable {
           for (const p of this.pending.splice(0)) void this.panel.webview.postMessage(p);
           return;
         }
+        case 'clientError':
+          this.lastClientError = String(m.message);
+          console.error('[skills-manager] dashboard render error:', String(m.message).slice(0, 500));
+          return;
+        case 'reloadWindow':
+          await vscode.commands.executeCommand('workbench.action.reloadWindow');
+          return;
         case 'refresh':
           await this.withBusy('refresh', () => this.service.refresh());
           return;
@@ -105,6 +120,21 @@ export class DashboardPanel implements vscode.Disposable {
           return;
         case 'copyMove':
           await copyOrMoveSkill(this.service, m.skillId);
+          return;
+        case 'chooseCopy':
+          await this.withBusy('chooseCopy', () => chooseCopy(this.service, m.skillId));
+          return;
+        case 'copyTo':
+          await copyOrMoveSkill(this.service, m.skillId, { targetId: m.locationId });
+          return;
+        case 'addToProject':
+          await this.withBusy('addToProject', () => copyOrMoveSkill(this.service, m.skillId, { toProject: true }));
+          return;
+        case 'fix':
+          await this.withBusy('fix', () => fixSkill(this.service, m.skillId, m.fixId as FixId | undefined));
+          return;
+        case 'merge':
+          await this.withBusy('merge', () => handleMerge(this.service, m.suggestionId, m.action, m.skillId));
           return;
         case 'checkUpdates':
           await this.withBusy('checkUpdates', () => checkForUpdates(this.service, true));
@@ -131,8 +161,13 @@ export class DashboardPanel implements vscode.Disposable {
           await this.resetInstall();
           this.post({ type: 'installCancelled' });
           return;
+        default:
+          // A dashboard from a newer build than this host: say so instead of ignoring the click.
+          log().warn(`dashboard: unknown action ${(m as { type: string }).type}`);
+          this.post({ type: 'error', op: 'general', message: 'This action is not available in the running extension. Run "Developer: Reload Window" to finish updating.' });
       }
     } catch (e) {
+      log().error(`dashboard ${m.type} failed`, e as Error);
       this.post({ type: 'error', op: m.type, message: e instanceof UserError ? e.message : `Unexpected error: ${(e as Error).message}`, code: (e as UserError).code });
     }
   }
@@ -330,6 +365,7 @@ export class DashboardPanel implements vscode.Disposable {
     const w = this.panel.webview;
     const nonce = randomBytes(16).toString('base64');
     const css = w.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'dashboard.css'));
+    const icons = w.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'codicons', 'codicon.css'));
     const js = w.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview.js'));
     const csp = [
       "default-src 'none'",
@@ -344,6 +380,7 @@ export class DashboardPanel implements vscode.Disposable {
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="${icons}">
 <link rel="stylesheet" href="${css}">
 <title>AI Skills</title>
 </head>

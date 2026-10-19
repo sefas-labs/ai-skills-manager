@@ -20,6 +20,8 @@ const include = [
   ['LICENSE', 'extension/LICENSE.txt'],
   ['dist/extension.js', 'extension/dist/extension.js'],
   ['dist/webview.js', 'extension/dist/webview.js'],
+  ['dist/codicons/codicon.css', 'extension/dist/codicons/codicon.css'],
+  ['dist/codicons/codicon.ttf', 'extension/dist/codicons/codicon.ttf'],
   ['media/dashboard.css', 'extension/media/dashboard.css'],
   ['media/icon.svg', 'extension/media/icon.svg'],
   ['media/icon.png', 'extension/media/icon.png'],

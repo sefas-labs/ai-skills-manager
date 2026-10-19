@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { ResolvedLocation, Scope, SkillRecord } from '../core/types';
+import { fixesFor } from '../core/fixes';
 import type { SkillsService } from './service';
 
 type Node =
@@ -65,6 +66,7 @@ export class SkillsTreeProvider implements vscode.TreeDataProvider<Node> {
         md.appendText(l.path);
         if (l.origin === 'nested') md.appendMarkdown(`\n\n$(info) Nested: agents load these when they work on files under ${escapeMd(l.appliesTo ?? '')}/ (Claude Code namespaces them as /${escapeMd(l.appliesTo ?? '')}:name).`);
         if (l.origin === 'parent') md.appendMarkdown('\n\n$(info) Above the workspace folder, inside the same git repository.');
+        if (l.skippedSynced) md.appendMarkdown(`\n\n$(info) ${l.skippedSynced} skill(s) synced for another claude.ai account are not listed: Claude Code only loads the signed-in account's skills.`);
         if (l.readOnly) md.appendMarkdown(`\n\n$(lock) Read-only: ${escapeMd(l.readOnlyReason ?? '')}`);
         if (l.ignoredEntries.length) md.appendMarkdown(`\n\n$(info) Ignored by agents (no SKILL.md): ${l.ignoredEntries.map(escapeMd).join(', ')}`);
         md.supportThemeIcons = true;
@@ -103,7 +105,8 @@ export class SkillsTreeProvider implements vscode.TreeDataProvider<Node> {
         for (const i of s.issues.slice(0, 5)) md.appendMarkdown(`${i.severity === 'error' ? '$(error)' : i.severity === 'warning' ? '$(warning)' : '$(info)'} ${escapeMd(i.message)}\n\n`);
         item.tooltip = md;
         // skill | skill-readonly, plus "+update" when an update can be applied.
-        item.contextValue = (s.readOnly ? 'skill-readonly' : 'skill') + (hasUpdate && !s.readOnly && !s.isSymlink ? '+update' : '');
+        const fixable = fixesFor(s, this.service.location(s.locationId)).length > 0;
+        item.contextValue = (s.readOnly ? 'skill-readonly' : 'skill') + (hasUpdate && !s.readOnly && !s.isSymlink ? '+update' : '') + (fixable ? '+fix' : '') + (s.scope !== 'workspace' ? '+global' : '') + (s.issues.some((i) => i.code.startsWith('duplicate:')) ? '+dup' : '');
         item.id = s.id;
         item.command = { command: 'skillsManager.showInDashboard', title: 'Show details', arguments: [node] };
         return item;

@@ -5,6 +5,7 @@
 import type { Finding } from '../core/inspector';
 import type { Issue, ProviderSummary, ResolvedLocation, Scope } from '../core/types';
 import type { UpdateStatus } from '../core/updates';
+import type { AgentDetection } from '../core/agents';
 
 export interface ViewSkill {
   id: string;
@@ -23,16 +24,52 @@ export interface ViewSkill {
   issues: Issue[];
   readOnly: boolean;
   readOnlyReason?: string;
+  /** Managed sub-folder it lives in (e.g. 'synced' for claude.ai). */
+  managed?: string;
+  /** Content fingerprint (only when another folder has the same name). */
+  contentId?: string;
   source?: { url: string; ref: string; commit: string; installedAt: string };
   sourceHint?: string;
   /** Where update information comes from, when the skill is tracked. */
   tracked?: 'lock' | 'gh-skill';
+  /** Automatic fixes available for its issues. */
+  fixes: Array<{ id: string; codes: string[]; label: string; detail: string }>;
   update?: { status: UpdateStatus; remoteCommit?: string; message?: string; checkedAt: string };
   skillMdLines: number;
 }
 
+export interface ViewMerge {
+  id: string;
+  name: string;
+  scope: Scope;
+  verdict: 'remove-redundant' | 'unify-versions' | 'expected';
+  identical: boolean;
+  seenTwiceBy: string[];
+  stillTwiceBy: string[];
+  keep: string[];
+  remove: string[];
+  copies: Array<{
+    skillId: string;
+    displayDir: string;
+    locationLabel: string;
+    readers: string[];
+    writable: boolean;
+    version: number;
+    modifiedAt?: string;
+    changedFiles: number;
+  }>;
+}
+
 export interface ViewState {
   scannedAt: string;
+  /** Build of the extension host; the webview compares it with its own. */
+  buildId?: string;
+  /** The editor we run in and the agent built into it (cursor / copilot). */
+  host: { appName: string; agentId?: string };
+  /** Which agents look installed on this machine, with the evidence found. */
+  agents: Record<string, AgentDetection>;
+  /** Duplicate skills that can be merged (same name, same scope). */
+  merges: ViewMerge[];
   updatesCheckedAt?: string;
   trusted: boolean;
   githubSignedIn: boolean;
@@ -98,6 +135,8 @@ export type HostToWebview =
 
 export type WebviewToHost =
   | { type: 'ready' }
+  | { type: 'reloadWindow' }
+  | { type: 'clientError'; message: string }
   | { type: 'refresh' }
   | { type: 'getDetail'; skillId: string }
   | { type: 'openSkillFile'; skillId: string; rel?: string }
@@ -105,7 +144,12 @@ export type WebviewToHost =
   | { type: 'copyPath'; skillId: string }
   | { type: 'uninstall'; skillId: string }
   | { type: 'copyMove'; skillId: string }
+  | { type: 'addToProject'; skillId: string }
+  | { type: 'copyTo'; skillId: string; locationId: string }
+  | { type: 'chooseCopy'; skillId: string }
   | { type: 'checkUpdates' }
+  | { type: 'merge'; suggestionId: string; action: 'apply' | 'compare' | 'unify'; skillId?: string }
+  | { type: 'fix'; skillId: string; fixId?: string }
   | { type: 'update'; skillId: string }
   | { type: 'inspect'; url: string }
   | { type: 'stage'; candidateIds: string[] }
