@@ -378,7 +378,7 @@
     "watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node -e \"require('fs').rmSync('out-test',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node scripts/run-tests.mjs out-test/test .test.js",
-    "test:smoke": "node scripts/build.mjs && node scripts/run-tests.mjs test/smoke .test.mjs",
+    "test:smoke": "node scripts/build.mjs && tsc -p tsconfig.test.json && node scripts/run-tests.mjs test/smoke .test.mjs",
     "test:all": "npm run test && npm run test:smoke",
     "package": "vsce package --no-dependencies --allow-missing-repository",
     "package:offline": "node scripts/build.mjs --production && node scripts/package-vsix.mjs",

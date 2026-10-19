@@ -547,6 +547,10 @@ export async function cleanupStaging(staged: StagedSkill[]): Promise<void> {
   for (const s of staged) await fs.rm(path.dirname(s.stagingDir), { recursive: true, force: true }).catch(() => undefined);
 }
 
+/**
+ * Prefix for backup names: sortable time plus a random suffix, so two backups
+ * of same-named folders in the same millisecond never collide.
+ */
 export function timestamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, '-');
+  return `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 6)}`;
 }

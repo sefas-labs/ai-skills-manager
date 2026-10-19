@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { pathKey } from './paths';
 import type { LockEntry } from './types';
 
@@ -17,6 +18,8 @@ interface LockFileShape {
 export class LockStore {
   private data: LockFileShape = { version: 1, entries: {} };
   private loaded = false;
+  /** Saves run one after another: concurrent installs/removals must not race on the file. */
+  private saving: Promise<void> = Promise.resolve();
 
   constructor(private readonly file: string, private readonly platform: NodeJS.Platform = process.platform) {}
 
@@ -55,10 +58,14 @@ export class LockStore {
     await this.save();
   }
 
-  private async save(): Promise<void> {
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(this.data, null, 2), 'utf8');
-    await fs.rename(tmp, this.file);
+  private save(): Promise<void> {
+    const run = async () => {
+      await fs.mkdir(path.dirname(this.file), { recursive: true });
+      const tmp = `${this.file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify(this.data, null, 2), 'utf8');
+      await fs.rename(tmp, this.file);
+    };
+    this.saving = this.saving.then(run, run);
+    return this.saving;
   }
 }

@@ -102,6 +102,9 @@ Bugs corregidos:
   - **MCP:** `.mcp.json`, `~/.claude.json` (usuario y local), `.cursor/mcp.json`, `.vscode/mcp.json`, el `mcp.json` del perfil de VS Code, `~/.copilot/mcp-config.json` y `[mcp_servers.*]` de Codex.
   - **Secretos:** de `env` y `headers` solo se muestran los nombres. Se ocultan los argumentos con pinta de credencial y las contraseñas de las cadenas de conexión, y las URLs se muestran sin query string.
   - Avisa cuando el mismo servidor MCP está en dos archivos de un mismo agente.
+- Tests de punta a punta de los flujos con modales (`test/smoke/flows.test.mjs`): instalar, actualizar, arreglar, apagar por agente, quitar y fusionar, con la extensión empaquetada, modales confirmados y GitHub simulado.
+- Corregido: dos backups de carpetas con el mismo nombre en el mismo milisegundo chocaban (`ENOTEMPTY`), lo que dejaba un merge a medias. Los nombres de backup ahora llevan un sufijo aleatorio.
+- Corregido: dos escrituras simultáneas del lock (dos acciones seguidas) competían por el mismo archivo temporal. Ahora se serializan.
 - `npm run test:e2e`: ejecuta la extensión dentro de VS Code o Cursor reales, con un perfil temporal y un proxy local.
 
 ## 0.1.0 — 2026-10-18

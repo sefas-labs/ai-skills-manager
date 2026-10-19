@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { parseFrontmatter } from './frontmatter';
 import { pathKey, tildify } from './paths';
 import { contentFingerprint } from './hashing';
+import { timestamp } from './installer';
 import { expandContext } from './monorepo';
 import { claudePluginSkillRoots } from './plugins';
 import { trackedFromGhFrontmatter } from './provenance';
@@ -328,7 +329,7 @@ export async function archiveSyncedBucket(homeDir: string, bucket: string, backu
   const st = await fs.lstat(dir).catch(() => null);
   if (!st?.isDirectory()) throw new UserError('The folder no longer exists. Refresh the list.');
   await fs.mkdir(backupRoot, { recursive: true });
-  const dest = path.join(backupRoot, `${new Date().toISOString().replace(/[:.]/g, '-')}-claude-ai-${bucket.slice(0, 8)}`);
+  const dest = path.join(backupRoot, `${timestamp()}-claude-ai-${bucket.slice(0, 8)}`);
   await fs.rename(dir, dest).catch(async (e: NodeJS.ErrnoException) => {
     if (e.code !== 'EXDEV') throw e;
     await fs.cp(dir, dest, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
