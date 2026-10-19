@@ -3,3 +3,5 @@ dist/
 out-test/
 *.vsix
 .DS_Store
+.agents/
+.vscode/
