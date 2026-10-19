@@ -26,6 +26,7 @@ import { chooseCopy } from './choose';
 import { fixSkill } from './fixes';
 import { log } from './log';
 import { handleMerge } from './merge';
+import { setSkillToggle, type ToggleRequest } from './toggles';
 import { copyOrMoveSkill } from './transfer';
 import { checkForUpdates, confirmAndUpdate } from './updates';
 
@@ -147,6 +148,11 @@ export class DashboardPanel implements vscode.Disposable {
         case 'catalogSearch': {
           const skills = await this.withBusy('catalogSearch', () => this.service.catalog.search(m.query));
           this.post({ type: 'catalogResults', query: m.query, skills });
+          return;
+        }
+        case 'setToggle': {
+          const req = m.agent === 'claude' ? { agent: m.agent, value: m.value } : m.agent === 'codex' ? { agent: m.agent, enabled: m.enabled } : { agent: m.agent, mode: m.mode };
+          await this.withBusy('toggle', () => setSkillToggle(this.service, m.skillId, req as ToggleRequest));
           return;
         }
         case 'archiveSynced': {

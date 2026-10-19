@@ -5,6 +5,7 @@ import { detectAgents, hostAgentFor, type AgentDetection } from '../core/agents'
 import { discover, DiscoverOptions, readClaudeSyncBucket } from '../core/discovery';
 import { fixesFor } from '../core/fixes';
 import { CatalogStore } from './catalog';
+import { readToggleState, toggleFiles, type SkillToggleState } from '../core/toggles';
 import { mergeSuggestions, type MergeSuggestion } from '../core/merge';
 import { LockStore } from '../core/lockfile';
 import { BUILTIN_PROVIDERS } from '../core/providers';
@@ -32,6 +33,7 @@ export class SkillsService implements vscode.Disposable {
   agents: Record<string, AgentDetection> = {};
   readonly catalog = new CatalogStore(this);
   merges: MergeSuggestion[] = [];
+  private toggles = new Map<string, SkillToggleState>();
   readonly hostAgent = hostAgentFor(vscode.env.appName);
 
   constructor(private readonly context: vscode.ExtensionContext) {
@@ -128,6 +130,15 @@ export class SkillsService implements vscode.Disposable {
       this.agents = agents;
       const installed = Object.entries(agents).filter(([, a]) => a.installed).map(([id]) => id);
       this.merges = await mergeSuggestions(result.skills, result.locations, { relevantAgents: installed }).catch(() => []);
+      this.toggles = new Map(
+        await Promise.all(
+          result.skills.map(async (s) => {
+            const folder = s.scope === 'workspace' ? result.locations.find((l) => l.id === s.locationId)?.workspaceFolder : ctx.workspaceFolders[0];
+            const st = await readToggleState(s, toggleFiles(ctx.homeDir, folder)).catch(() => undefined);
+            return [s.id, st] as const;
+          }),
+        ).then((entries) => entries.filter((e): e is readonly [string, SkillToggleState] => !!e[1])),
+      );
       this.result = result;
       this.rewatch(result.locations);
       this.emitter.fire(result);
@@ -234,6 +245,7 @@ export class SkillsService implements vscode.Disposable {
       managed: s.managed,
       namespace: s.namespace,
       group: s.group,
+      toggles: this.toggles.get(s.id),
       contentId: s.contentId,
       source: s.source
         ? { url: s.source.source.url, ref: s.source.source.ref, commit: s.source.source.commit, installedAt: s.source.installedAt }

@@ -30,6 +30,13 @@ export interface ViewSkill {
   namespace?: string;
   /** Category folder (skills/<group>/<skill>) — only Cursor finds it. */
   group?: string;
+  /** Per-agent switches (each agent's own mechanism). */
+  toggles?: {
+    claude?: { value: 'on' | 'name-only' | 'user-invocable-only' | 'off'; from?: 'user' | 'project' | 'local' };
+    codex?: { enabled: boolean };
+    modelInvocation: boolean;
+    userInvocable: boolean;
+  };
   /** Content fingerprint (only when another folder has the same name). */
   contentId?: string;
   source?: { url: string; ref: string; commit: string; installedAt: string };
@@ -178,6 +185,9 @@ export type WebviewToHost =
   | { type: 'catalogSearch'; query: string }
   | { type: 'openUrl'; url: string }
   | { type: 'archiveSynced'; bucket: string }
+  | { type: 'setToggle'; skillId: string; agent: 'claude'; value: 'on' | 'name-only' | 'user-invocable-only' | 'off' }
+  | { type: 'setToggle'; skillId: string; agent: 'codex'; enabled: boolean }
+  | { type: 'setToggle'; skillId: string; agent: 'frontmatter'; mode: 'auto' | 'manual' | 'off' }
   | { type: 'merge'; suggestionId: string; action: 'apply' | 'compare' | 'unify'; skillId?: string }
   | { type: 'fix'; skillId: string; fixId?: string }
   | { type: 'update'; skillId: string }

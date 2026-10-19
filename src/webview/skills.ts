@@ -5,7 +5,7 @@ import type { ViewSkill } from '../shared/protocol';
 import { render } from './main';
 import { type SkillsTab, busy, persisted, save, send, ui } from './store';
 import { type Child, button, chip, h, icon, select, sevIcon, skeleton } from './dom';
-import { agentDots, agentPill, fmtDate, problems, providerName, qname, short, shortId, shown } from './agents';
+import { agentDots, agentPill, fmtDate, problems, providerName, qname, short, shortId, shown, swatch } from './agents';
 import { scrollToMerges } from './overview';
 
 /** Issues of an installed skill, each with its fix button (or a pointer to edit by hand). */
@@ -116,6 +116,7 @@ export function rowChips(sk: ViewSkill): Child[] {
     sk.isSymlink ? chip('link', 'subtle', `→ ${sk.realDir}`) : null,
     sk.namespace ? chip('plugin', 'subtle', sk.readOnlyReason) : sk.managed === 'synced' ? chip('claude.ai', 'subtle', 'Synced from claude.ai (read-only)') : sk.readOnly ? chip('read-only', 'subtle', sk.readOnlyReason) : null,
     sk.group ? chip(`${sk.group}/`, 'subtle', 'Inside a category folder: only Cursor walks skill folders recursively') : null,
+    ...offChips(sk),
     sk.update?.status === 'update-available' ? chip('update', 'update', 'A newer version is available on GitHub') : null,
   ];
 }
@@ -167,6 +168,94 @@ export function groupRows(copies: ViewSkill[]): Node {
     ),
     open ? h('div', { class: 'group-children' }, copies.map((c) => skillRow(c, true))) : null,
   );
+}
+
+/** Small chips for agents that have the skill switched off or manual-only. */
+function offChips(sk: ViewSkill): Child[] {
+  const t = sk.toggles;
+  if (!t) return [];
+  const vis = (id: string) => sk.visibleTo.includes(id) && shown().some((p) => p.id === id);
+  return [
+    vis('claude-code') && t.claude && t.claude.value !== 'on' ? chip(t.claude.value === 'off' ? 'off: Claude' : 'Claude: limited', 'warn', `Claude Code skillOverrides: ${t.claude.value}`) : null,
+    vis('codex') && t.codex && !t.codex.enabled ? chip('off: Codex', 'warn', 'Disabled in ~/.codex/config.toml') : null,
+    !t.userInvocable && !t.modelInvocation ? chip('disabled', 'warn', 'disable-model-invocation + user-invocable: false') : !t.modelInvocation ? chip('manual', 'subtle', 'Only loads when invoked as /' + sk.name) : null,
+  ];
+}
+
+/** Per-agent on/off, each with the agent's own mechanism. */
+function switchesSection(sk: ViewSkill): Node | null {
+  const t = sk.toggles;
+  if (!t) return null;
+  const agents = shown().filter((p) => sk.visibleTo.includes(p.id));
+  if (!agents.length) return null;
+  const working = busy.has('toggle');
+  const seg = <T extends string>(options: Array<[T, string, string]>, current: T, onPick: (v: T) => void, disabled = false) =>
+    h(
+      'div',
+      { class: 'segmented small-seg', role: 'group' },
+      options.map(([v, label, title]) =>
+        h('button', { class: `seg ${v === current ? 'active' : ''}`, type: 'button', title, 'aria-pressed': v === current ? 'true' : 'false', disabled: disabled || working || v === current, onClick: () => onPick(v) }, label),
+      ),
+    );
+  const rows: Node[] = [];
+  const has = (id: string) => agents.some((a) => a.id === id);
+  if (has('claude-code')) {
+    rows.push(
+      h(
+        'div',
+        { class: 'switch-row' },
+        h('span', { class: 'switch-agent' }, swatch('claude-code'), 'Claude Code'),
+        sk.namespace || !t.claude
+          ? h('span', { class: 'small muted' }, 'Plugin skill — enable or disable the plugin with /plugin in Claude Code.')
+          : [
+              seg<'on' | 'name-only' | 'user-invocable-only' | 'off'>(
+                [
+                  ['on', 'On', 'Listed to Claude with its description'],
+                  ['name-only', 'Name only', 'Listed to Claude by name only'],
+                  ['user-invocable-only', 'Only /name', 'Hidden from Claude; you can still run /' + sk.name],
+                  ['off', 'Off', 'Hidden everywhere'],
+                ],
+                t.claude.value,
+                (value) => send({ type: 'setToggle', skillId: sk.id, agent: 'claude', value }),
+              ),
+              t.claude.from ? h('span', { class: 'small muted' }, `from ${t.claude.from} settings`) : null,
+            ],
+      ),
+    );
+  }
+  if (has('codex') && t.codex) {
+    rows.push(
+      h(
+        'div',
+        { class: 'switch-row' },
+        h('span', { class: 'switch-agent' }, swatch('codex'), 'Codex'),
+        seg<'on' | 'off'>([['on', 'On', 'Enabled'], ['off', 'Off', 'Disabled in ~/.codex/config.toml (restart Codex)']], t.codex.enabled ? 'on' : 'off', (v) => send({ type: 'setToggle', skillId: sk.id, agent: 'codex', enabled: v === 'on' })),
+      ),
+    );
+  }
+  const fmAgents = agents.filter((a) => a.id === 'cursor' || a.id === 'copilot');
+  if (fmAgents.length) {
+    const mode = !t.modelInvocation && !t.userInvocable ? 'off' : !t.modelInvocation ? 'manual' : 'auto';
+    rows.push(
+      h(
+        'div',
+        { class: 'switch-row' },
+        h('span', { class: 'switch-agent' }, fmAgents.map((a) => swatch(a.id)), fmAgents.map((a) => short(a.displayName)).join(' & ')),
+        seg<'auto' | 'manual' | 'off'>(
+          [
+            ['auto', 'Auto', 'Agents load it when relevant'],
+            ['manual', 'Only /name', 'disable-model-invocation: true'],
+            ['off', 'Off', 'disable-model-invocation: true + user-invocable: false'],
+          ],
+          mode,
+          (v) => send({ type: 'setToggle', skillId: sk.id, agent: 'frontmatter', mode: v }),
+          sk.readOnly,
+        ),
+        h('span', { class: 'small muted', title: 'Cursor and Copilot have no per-skill setting: this edits SKILL.md and also affects Claude Code' }, sk.readOnly ? 'read-only skill' : 'edits SKILL.md'),
+      ),
+    );
+  }
+  return h('div', { class: 'switches' }, h('h3', null, 'On / off per agent'), rows);
 }
 
 export function skillsView(t: SkillsTab): Node {
@@ -330,6 +419,7 @@ export function skillDetail(sk: ViewSkill): Node {
     sk.description ? h('p', null, sk.description) : null,
     h('h3', null, 'Available to'),
     h('div', { class: 'vis big' }, shown().map((p) => agentPill(p.id, sk.visibleTo.includes(p.id)))),
+    switchesSection(sk),
     h(
       'dl',
       { class: 'kv' },

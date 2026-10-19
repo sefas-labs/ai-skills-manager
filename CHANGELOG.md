@@ -89,6 +89,12 @@ Bugs corregidos:
 - **Cursor recorre carpetas de categoría** (`skills/<grupo>/<skill>/SKILL.md`). Esos skills se listan con el chip `<grupo>/`, y si otros agentes leen la misma carpeta se avisa de que ellos no los ven.
 - Actualizar un skill de `gh skill` ofrece **Update with gh skill…**: escribe `gh skill update <skill> --dir <carpeta>` en una terminal sin ejecutarlo.
 - **Move to backup…** para los skills sincronizados de otra cuenta de claude.ai. Nunca toca la cuenta activa.
+- **Encender / apagar por agente** (detalle del skill → *On / off per agent*), cada uno con su mecanismo documentado:
+  - **Claude Code:** `skillOverrides`: On / Name only / Only /name / Off, en la configuración de usuario o en `.claude/settings.local.json` para los skills del proyecto, como el menú `/skills`.
+  - **Codex:** `[[skills.config]] enabled = false` en `~/.codex/config.toml`. El editor de TOML solo toca esos bloques; hay que reiniciar Codex.
+  - **Cursor y Copilot:** `disable-model-invocation` / `user-invocable` en el SKILL.md. Se avisa de que edita el skill y afecta a todos los agentes que respetan esas claves.
+
+  Todos los cambios pasan por un modal que indica el archivo y guardan un backup. La lista marca *off: Claude*, *off: Codex*, *manual* y *disabled*.
 - `npm run test:e2e`: ejecuta la extensión dentro de VS Code o Cursor reales, con un perfil temporal y un proxy local.
 
 ## 0.1.0 — 2026-10-18

@@ -44,7 +44,7 @@ function fixture() {
         fixes: [{ id: 'set-name-to-folder', codes: ['name-mismatch'], label: 'Set name to "needs-fix"', detail: 'Change name.' }],
       }),
       skill('g1', 'docs', 'gc', '~/.claude/skills', 'global', ['claude-code', 'cursor', 'copilot'], { readOnly: true, managed: 'synced', readOnlyReason: 'Synced from claude.ai' }),
-      skill('g2', 'checklist', 'gc', '~/.claude/skills', 'global', ['claude-code', 'cursor', 'copilot']),
+      skill('g2', 'checklist', 'gc', '~/.claude/skills', 'global', ['claude-code', 'cursor', 'copilot'], { toggles: { claude: { value: 'name-only', from: 'user' }, codex: { enabled: true }, modelInvocation: true, userInvocable: true } }),
       skill('p1', 'checklist', 'pl', 'plugin dev', 'global', ['claude-code'], { namespace: 'dev', readOnly: true, readOnlyReason: 'Installed by a plugin' }),
     ],
   };
@@ -178,4 +178,17 @@ test('install → browse catalog: lists a collection, filters, and Install hands
   click('Browse catalog');
   click('Sign in to search GitHub');
   assert.equal(sent.at(-1).type, 'signIn');
+});
+
+test('per-agent switches post each agent own mechanism', () => {
+  const { doc, sent, post, click } = mount({ tab: 'global', selected: 'g2' });
+  post({ type: 'state', state: fixture() });
+  const rows = [...doc.querySelectorAll('.switch-row')];
+  assert.match(rows[0].textContent, /Claude Code.*from user settings/);
+  assert.ok(doc.querySelector('.list').textContent.includes('Claude: limited'), 'list shows the limited state');
+  click('Off', rows[0]);
+  assert.deepEqual(sent.at(-1), { type: 'setToggle', skillId: 'g2', agent: 'claude', value: 'off' });
+  const fm = rows.find((r) => /Cursor & Copilot/.test(r.textContent));
+  click('Only /name', fm);
+  assert.deepEqual(sent.at(-1), { type: 'setToggle', skillId: 'g2', agent: 'frontmatter', mode: 'manual' });
 });
