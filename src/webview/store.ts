@@ -2,7 +2,7 @@
  * the host is inserted with textContent, never innerHTML. */
 import type { ViewCatalogSkill, ViewCatalogSource, ViewInspection, ViewSkillDetail, ViewStaged, ViewState, WebviewToHost } from '../shared/protocol';
 
-declare function acquireVsCodeApi(): { postMessage(m: unknown): void; getState(): unknown; setState(s: unknown): void };
+declare function acquireVsCodeApi(): { postMessage(message: unknown): void; getState(): unknown; setState(state: unknown): void };
 
 export const api = acquireVsCodeApi();
 
@@ -21,7 +21,8 @@ export type SkillsTab = 'project' | 'global';
 
 export interface Persisted {
   tab: Tab;
-  q: string;
+  /** Text typed in the skills search box. */
+  searchQuery: string;
   provider: string;
   status: string;
   selected?: string;
@@ -32,16 +33,27 @@ export interface Persisted {
   showEmptyFolders?: boolean;
   installMode?: 'browse' | 'url';
   catalogSource?: string;
-  catalogQ?: string;
+  /** Text typed in the catalog search box. */
+  catalogQuery?: string;
   /** Source bundles (plugins, claude.ai, collections) expanded in the skills list. */
   openBundles?: string[];
   /** Show every skill on its own instead of grouped by where it came from. */
   flatList?: boolean;
 }
 
-export const persisted: Persisted = { tab: 'overview', q: '', provider: 'all', status: 'all', url: '', ...((api.getState() as Partial<Persisted>) ?? {}) };
-// State saved by v0.2.0 had a single 'skills' tab.
-if ((persisted.tab as string) === 'skills') persisted.tab = 'project';
+/** Earlier versions saved some fields under other names. */
+function migrateSavedState(saved: Record<string, unknown>): Partial<Persisted> {
+  const migrated = { ...saved };
+  if (migrated['tab'] === 'skills') migrated['tab'] = 'project';
+  if (typeof migrated['q'] === 'string' && migrated['searchQuery'] === undefined) migrated['searchQuery'] = migrated['q'];
+  if (typeof migrated['catalogQ'] === 'string' && migrated['catalogQuery'] === undefined) migrated['catalogQuery'] = migrated['catalogQ'];
+  delete migrated['q'];
+  delete migrated['catalogQ'];
+  return migrated as Partial<Persisted>;
+}
+
+const savedState = (api.getState() as Record<string, unknown> | undefined) ?? {};
+export const persisted: Persisted = { tab: 'overview', searchQuery: '', provider: 'all', status: 'all', url: '', ...migrateSavedState(savedState) };
 
 export const busy = new Set<string>();
 
@@ -61,7 +73,7 @@ export const install = {
 
 export const save = () => api.setState(persisted);
 
-export const send = (m: WebviewToHost) => api.postMessage(m);
+export const send = (message: WebviewToHost) => api.postMessage(message);
 
 export const INSTALL_OPS = new Set(['inspect', 'stage', 'install', 'catalogList', 'catalogSearch']);
 

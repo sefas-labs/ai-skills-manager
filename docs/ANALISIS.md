@@ -183,12 +183,14 @@ skills-manager/
 │   │   ├── types.ts  frontmatter.ts  validate.ts  paths.ts  hashing.ts
 │   │   ├── discovery.ts  monorepo.ts  plugins.ts  agents.ts  providers/index.ts
 │   │   ├── github.ts  inspector.ts  installer.ts  lockfile.ts  provenance.ts  updates.ts
-│   │   ├── transfer.ts  fixes.ts  merge.ts  choose.ts  toggles.ts
-│   │   └── catalog.ts  customizations.ts
+│   │   ├── transfer.ts  fixes.ts  merge.ts  choose.ts  toggles.ts  editing.ts
+│   │   ├── catalog.ts  customizations.ts
+│   │   └── safeWrite.ts  concurrency.ts   escritura atómica con backup; tareas en paralelo acotadas
 │   ├── shared/protocol.ts  mensajes host ↔ webview
 │   ├── ui/                 service, tree, dashboard, actions, log, updates, transfer, fixes,
-│   │                       merge, choose, toggles, catalog
-│   └── webview/            store, dom, agents, skills, overview, map, config, catalog, install, main
+│   │                       merge, choose, toggles, catalog, editing
+│   └── webview/            store, dom, agents, skills (lista), skillDetail (detalle), overview,
+│                           map, config, catalog, install, main
 ├── media/                  dashboard.css, icon.svg, icon.png (codicons se copian a dist/ al compilar)
 ├── test/
 │   ├── unit/ integration/  núcleo en Node (GitHub simulado con SHAs como git, directorios temporales)

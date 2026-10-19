@@ -6,28 +6,29 @@ export type Child = Node | string | number | null | undefined | false | Child[];
 
 export type Props = Record<string, unknown> | null;
 
+const EVENT_PROP_PREFIX = 'on';
+
+/** Creates an element: `class`, `onX` listeners, form properties, other keys as attributes; strings become text nodes. */
 export function h<K extends keyof HTMLElementTagNameMap>(tag: K, props?: Props, ...children: Child[]): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  if (props) {
-    for (const [k, v] of Object.entries(props)) {
-      if (v === undefined || v === null || v === false) continue;
-      if (k === 'class') el.className = String(v);
-      else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v as EventListener);
-      else if (k === 'value') (el as HTMLInputElement).value = String(v);
-      else if (k === 'checked') (el as HTMLInputElement).checked = !!v;
-      else if (k === 'disabled') (el as HTMLButtonElement).disabled = !!v;
-      else el.setAttribute(k, v === true ? '' : String(v));
-    }
+  const element = document.createElement(tag);
+  for (const [key, value] of Object.entries(props ?? {})) {
+    if (value === undefined || value === null || value === false) continue;
+    if (key === 'class') element.className = String(value);
+    else if (key.startsWith(EVENT_PROP_PREFIX) && typeof value === 'function') element.addEventListener(key.slice(EVENT_PROP_PREFIX.length).toLowerCase(), value as EventListener);
+    else if (key === 'value') (element as HTMLInputElement).value = String(value);
+    else if (key === 'checked') (element as HTMLInputElement).checked = !!value;
+    else if (key === 'disabled') (element as HTMLButtonElement).disabled = !!value;
+    else element.setAttribute(key, value === true ? '' : String(value));
   }
-  add(el, children);
-  return el;
+  add(element, children);
+  return element;
 }
 
-export function add(el: Node, children: Child[]): void {
-  for (const c of children) {
-    if (c === null || c === undefined || c === false) continue;
-    if (Array.isArray(c)) add(el, c);
-    else el.appendChild(typeof c === 'object' ? c : document.createTextNode(String(c)));
+export function add(parent: Node, children: Child[]): void {
+  for (const child of children) {
+    if (child === null || child === undefined || child === false) continue;
+    if (Array.isArray(child)) add(parent, child);
+    else parent.appendChild(typeof child === 'object' ? child : document.createTextNode(String(child)));
   }
 }
 
@@ -40,41 +41,47 @@ export function chip(text: string, kind = '', title?: string) {
   return h('span', { class: `chip ${kind}`, title }, text);
 }
 
-export function sevIcon(sev: string) {
-  const map: Record<string, string> = { error: 'error', high: 'error', warning: 'warning', info: 'info' };
-  return h('span', { class: `sev sev-${sev}`, role: 'img', 'aria-label': sev }, icon(map[sev] ?? 'circle-filled'));
+const SEVERITY_ICON: Record<string, string> = { error: 'error', high: 'error', warning: 'warning', info: 'info' };
+
+export function sevIcon(severity: string) {
+  return h('span', { class: `sev sev-${severity}`, role: 'img', 'aria-label': severity }, icon(SEVERITY_ICON[severity] ?? 'circle-filled'));
 }
 
-export function button(label: string, onClick: () => void, opts: { kind?: 'primary' | 'secondary' | 'danger' | 'link'; disabled?: boolean; title?: string } = {}) {
-  return h('button', { class: `btn ${opts.kind ?? 'secondary'}`, onClick, disabled: opts.disabled, title: opts.title, type: 'button' }, label);
+export function button(label: string, onClick: () => void, options: { kind?: 'primary' | 'secondary' | 'danger' | 'link'; disabled?: boolean; title?: string } = {}) {
+  return h('button', { class: `btn ${options.kind ?? 'secondary'}`, onClick, disabled: options.disabled, title: options.title, type: 'button' }, label);
 }
+
+/** The CSS defines three placeholder line widths: .w0, .w1 and .w2. */
+const SKELETON_WIDTH_COUNT = 3;
 
 /** Grey placeholder lines while something loads. */
 export function skeleton(lines: number): Node {
-  return h('div', { class: 'skeleton', 'aria-hidden': 'true' }, Array.from({ length: lines }, (_, i) => h('div', { class: `sk-line w${(i * 37) % 3}` })));
+  const line = (index: number) => h('div', { class: `sk-line w${index % SKELETON_WIDTH_COUNT}` });
+  return h('div', { class: 'skeleton', 'aria-hidden': 'true' }, Array.from({ length: lines }, (_, index) => line(index)));
 }
 
-export function select(value: string, options: Array<[string, string]>, onChange: (v: string) => void, label: string) {
+export function select(value: string, options: Array<[string, string]>, onChange: (value: string) => void, label: string) {
   return h(
     'label',
     { class: 'select' },
     h('span', { class: 'sr' }, label),
     h(
       'select',
-      { onChange: (e: Event) => onChange((e.target as HTMLSelectElement).value), 'aria-label': label },
-      options.map(([v, t]) => h('option', { value: v, selected: v === value ? true : undefined }, t)),
+      { onChange: (event: Event) => onChange((event.target as HTMLSelectElement).value), 'aria-label': label },
+      options.map(([optionValue, text]) => h('option', { value: optionValue, selected: optionValue === value ? true : undefined }, text)),
     ),
   );
 }
 
 export const SVG_NS = 'http://www.w3.org/2000/svg';
 
-export function svg(tag: string, attrs: Record<string, string | number>, ...children: Array<Node | string>): SVGElement {
-  const el = document.createElementNS(SVG_NS, tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
-  for (const c of children) el.append(c);
-  return el;
+export function svg(tag: string, attributes: Record<string, string | number>, ...children: Array<Node | string>): SVGElement {
+  const element = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, String(value));
+  for (const child of children) element.append(child);
+  return element;
 }
 
-export const clip = (t: string, n: number) => (t.length > n ? t.slice(0, n - 1) + '…' : t);
+/** Shortens `text` to `maxLength` characters, ending in "…" when cut. */
+export const clip = (text: string, maxLength: number) => (text.length > maxLength ? text.slice(0, maxLength - 1) + '…' : text);
 
