@@ -2,7 +2,7 @@
   "name": "ai-skills-manager",
   "displayName": "AI Skills Manager",
   "description": "See which AI agents (Claude Code, Cursor, Codex, Copilot) actually load each Agent Skill, catch conflicts and invalid skills, and install skills from GitHub with a security review.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "pietrosanjines",
   "license": "MIT",
   "icon": "media/icon.png",

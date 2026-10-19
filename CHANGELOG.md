@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.2.0 — 2026-10-18 (sin publicar)
+## 0.3.0 — 2026-10-19 (sin publicar)
+
+Incluye todo lo planificado para 0.2 (que no llegó a publicarse) y lo que se añadió después.
 
 ### Verificación en real del MVP (Paso 0)
 

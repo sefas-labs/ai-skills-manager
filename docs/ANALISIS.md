@@ -161,7 +161,7 @@ Correspondencia con los 8 módulos pedidos:
 | 3. Installation Manager | `core/installer.ts` | ✅ |
 | 4. Update Manager | `core/updates.ts`, `core/provenance.ts`, `ui/updates.ts` | ✅ v0.2 (tree SHA remoto, diff por blob SHA, procedencia de `gh skill`) |
 | 5. Configuration Manager | `ui/service.ts` (settings de la extensión) | ⚠️ solo settings propios; editar configs de agentes es v0.3+ |
-| 6. Registry / Marketplace | — | 🔜 v0.5 (fuera del MVP a propósito) |
+| 6. Registry / Marketplace | — | 🔜 en curso (catálogo en Install) |
 | 7. Dashboard UI | `ui/dashboard.ts`, `webview/main.ts`, `media/dashboard.css` | ✅ |
 | 8. Security & Validation | `core/validate.ts`, `core/inspector.ts`, `core/paths.ts` | ✅ |
 
@@ -382,6 +382,26 @@ Fuentes: [Claude Code](https://code.claude.com/docs/en/skills) · [Cursor](https
 | Copiar/mover pierde permisos `+x` de scripts locales | Se avisa en el modal (lista de archivos) | Es intencionado: regla `0o644` |
 | Escaneo de carpetas anidadas en workspaces grandes | Profundidad máx. 6, 5.000 carpetas, omite ocultas, `node_modules` y carpetas de build, sin seguir symlinks; desactivable | Monorepos más profundos pueden quedar sin cubrir |
 | Rutas de los agentes cambian | Adaptadores con `docsUrl` y fecha de verificación; `extraLocations` como escape | Mantenimiento continuo |
+
+### C.9 Añadido en 0.3 (tras usar la extensión en real)
+
+Estas funciones salieron de usar la extensión a diario (18–19 oct 2026):
+
+| Función | Dónde | Cómo funciona | Verificado |
+|---|---|---|---|
+| Detección de agentes y del editor | `core/agents.ts` | Solo mira archivos, sin ejecutar nada: binario en el PATH, app (`/Applications/Cursor.app`), `~/.claude.json`, `~/.codex/config.toml` o `auth.json`, `~/.copilot`, y extensiones (`anthropic.claude-code`, `openai.chatgpt`, `github.copilot(-chat)`). El editor se identifica por `vscode.env.appName`: Cursor → `cursor`; VS Code → `copilot` (VS Code 1.140 incluye `GitHub.copilot-chat`). | ✅ en esta máquina y con e2e en VS Code 1.140/1.142 y Cursor 3.25.9 |
+| Cuentas de claude.ai | `core/discovery.ts` | Hay un bucket por cuenta: `synced/<org>_<cuenta>`. Solo se lista el de `oauthAccount.organizationUuid/accountUuid` de `~/.claude.json`; los demás se cuentan como omitidos y se explican en la UI. | ⚠️ formato observado, no documentado |
+| Copias idénticas | `core/hashing.ts`, discovery | Si varias copias con el mismo nombre tienen la misma huella de contenido (blob SHA de git por archivo), es información, no conflicto. | ✅ tests |
+| Arreglos automáticos | `core/fixes.ts`, `ui/fixes.ts` | `name` = carpeta o renombrar la carpeta; añadir `name`, `description` o frontmatter; `skill.md` → `SKILL.md`; quitar un symlink roto. Las ediciones de SKILL.md cambian una línea, se verifican volviendo a parsear, guardan un backup y se escriben con `wx` + rename. | ✅ tests de integración |
+| Sugerencias de merge | `core/merge.ts`, `ui/merge.ts` | Solo dentro del mismo alcance: el conjunto mínimo de copias que sigue llegando a los agentes **instalados**. Las sobrantes van al backup; si todas son necesarias, se pueden igualar las versiones. | ✅ tests |
+| Elegir qué copia se usa | `core/choose.ts`, `ui/choose.ts` | Cursor y Copilot no documentan qué copia gana ni permiten ocultar una carpeta, así que la elección se aplica igualando las demás (nadie pierde el skill) o quitándolas (avisa de quién lo pierde). | ✅ tests + smoke |
+| Add to project | `ui/transfer.ts` | Copia un skill global a una carpeta del proyecto. Indica qué cargará el equipo y qué ganas tú, y avisa si la licencia es propietaria o el skill viene de claude.ai. | ✅ smoke |
+| Pestaña Map | `webview/main.ts` | Cobertura skill × agente con el motivo de cada celda y un botón *Copy to*, más un diagrama SVG agente → carpeta → skill, sin librerías. | ✅ jsdom + capturas |
+| Coherencia host/webview | `scripts/build.mjs` | Ambos bundles comparten el id de build. Si no coinciden (se reinstaló sin recargar), el dashboard pide recargar la ventana. | ✅ jsdom |
+
+**Lecciones del uso real:**
+- Reinstalar un VSIX sin recargar la ventana deja el dashboard nuevo hablando con el host viejo. Causó dos "bugs" que no lo eran y motivó el id de build y el canal de log **AI Skills**.
+- Los e2e arrancan un editor limpio, así que no ven ese caso; los smoke y jsdom sí lo cubren.
 
 ### C.8 Estado de implementación (v0.2)
 

@@ -6,7 +6,7 @@ Claude Code, Cursor, Codex and GitHub Copilot read skills (`SKILL.md`) from over
 
 Screenshots are in `docs/images/`.
 
-## What it does (v0.2)
+## What it does (v0.3)
 
 - **Multi-agent inventory:** scans the global and workspace folders that each agent reads according to its official documentation, plus any extra folders you configure.
   - **Monorepos:** also scans parent folders up to the repository root (Claude Code, Codex) and nested skills folders (Claude Code, Cursor).
@@ -98,18 +98,18 @@ npm run typecheck    # tsc with @types/vscode
 
 ```bash
 npm run build -- --production
-npm run package             # official: @vscode/vsce → ai-skills-manager-0.2.0.vsix
+npm run package             # official: @vscode/vsce → ai-skills-manager-0.3.0.vsix
 # without npm/vsce access:
 npm run package:offline     # dependency-free packager (scripts/package-vsix.mjs)
 ```
 
-Install: `code --install-extension ai-skills-manager-0.2.0.vsix`, or **Extensions: Install from VSIX…** in the command palette.
+Install: `code --install-extension ai-skills-manager-0.3.0.vsix`, or **Extensions: Install from VSIX…** in the command palette.
 
-Publishing to the Marketplace requires `vsce publish` with a real publisher (change `publisher` in `package.json`). For Open VSX (which Cursor uses): `npx ovsx publish ai-skills-manager-0.2.0.vsix -p <token>`.
+Publishing to the Marketplace requires `vsce publish` with a real publisher (change `publisher` in `package.json`). For Open VSX (which Cursor uses): `npx ovsx publish ai-skills-manager-0.3.0.vsix -p <token>`.
 
 ### Test in Cursor
 
-1. Install the VSIX: command palette → **Extensions: Install from VSIX…**, or `cursor --install-extension ai-skills-manager-0.2.0.vsix`.
+1. Install the VSIX: command palette → **Extensions: Install from VSIX…**, or `cursor --install-extension ai-skills-manager-0.3.0.vsix`.
 2. Checklist:
    - [ ] The **AI Skills** icon appears in the side bar.
    - [ ] The matrix shows `~/.cursor/skills`, `~/.agents/skills`, `~/.claude/skills` and `~/.codex/skills` as read by Cursor.
@@ -117,7 +117,7 @@ Publishing to the Marketplace requires `vsce publish` with a real publisher (cha
    - [x] Cursor 3.25.9 provides the `github` auth provider (verified with `test:e2e`). Without signing in, the extension keeps working (limit of 60 requests/hour).
    - [ ] Remove the skill and check that Cursor no longer sees it.
 
-## Known limitations (v0.2)
+## Known limitations (v0.3)
 
 - Doesn't show skills from plugins (Claude/Cursor), Claude Code's enterprise path, or skills contributed by VS Code extensions.
 - Cursor walks each skills folder recursively (`skills/<group>/<skill>/SKILL.md`); this extension only reads the first level.
