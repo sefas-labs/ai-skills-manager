@@ -108,6 +108,8 @@ Bugs corregidos:
 - Catálogo: añadida la colección **NVIDIA** (`NVIDIA/skills`, Apache-2.0, 418 skills).
 - Corregido: el parser del frontmatter rechazaba valores YAML válidos repartidos en varias líneas indentadas, tanto sin comillas como entre comillas, y los que empiezan en la línea siguiente a `description:`. Esos skills (41 de NVIDIA y 2 de Vercel) salían sin descripción y **no se podían instalar**, porque el frontmatter se daba por inválido. Ahora se leen bien las 1.171 skills de las 8 colecciones.
 - Corregido: el catálogo cortaba los SKILL.md de más de 256 KB. Ahora usa el mismo límite de 1 MB que la instalación.
+- Instalar → *Where to install* ya no es un desplegable con todas las carpetas posibles (muchas marcadas *new folder*). Ahora son dos tarjetas, **This project** y **All my projects**, cada una con su carpeta recomendada: la que llega a más agentes instalados, priorizando una que ya exista. *Choose another folder…* muestra las demás carpetas existentes y solo las nuevas que añaden un agente instalado.
+- Corregido: el aviso *"Already in this folder"* contaba los skills sincronizados de claude.ai, que no se reemplazan.
 - `npm run test:e2e`: ejecuta la extensión dentro de VS Code o Cursor reales, con un perfil temporal y un proxy local.
 
 ## 0.1.0 — 2026-10-18

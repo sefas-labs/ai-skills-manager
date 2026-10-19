@@ -7,7 +7,7 @@ import { catalogView } from './catalog';
 import { render } from './main';
 import { busy, errors, install, persisted, save, send, ui } from './store';
 import { button, chip, h, icon, sevIcon } from './dom';
-import { agentPill, fmtBytes, providerName, shown } from './agents';
+import { agentPill, fmtBytes, providerName, short, shown } from './agents';
 import { issueList } from './skills';
 
 export function findingList(findings: Finding[]) {
@@ -39,10 +39,18 @@ export function writableTargets(): ResolvedLocation[] {
   return ui.state!.locations.filter((l) => !l.readOnly && l.scope !== 'admin' && !(l.origin && !l.exists) && !(l.readers.length === 1 && l.readers[0] === 'custom' && !l.exists));
 }
 
+/** Agents shown in the dashboard (the installed ones) that read a folder. */
+const reach = (t: ResolvedLocation) => t.readers.filter((r) => shown().some((p) => p.id === r));
+
+/** Best folder of a scope: reaches the most installed agents; an existing folder wins ties. */
+export function recommendedTarget(scope: 'workspace' | 'global'): ResolvedLocation | undefined {
+  return writableTargets()
+    .filter((t) => t.scope === scope && !t.origin)
+    .sort((a, b) => reach(b).length - reach(a).length || Number(b.exists) - Number(a.exists) || b.readers.length - a.readers.length)[0];
+}
+
 export function defaultTarget(): string {
-  const t = writableTargets();
-  const best = [...t].sort((a, b) => b.readers.length - a.readers.length || (a.scope === 'global' ? -1 : 1) - (b.scope === 'global' ? -1 : 1))[0];
-  return best?.id ?? '';
+  return (recommendedTarget('global') ?? recommendedTarget('workspace'))?.id ?? '';
 }
 
 export function installView(): Node {
@@ -212,28 +220,53 @@ export function step3(staged: ViewStaged[]): Node {
   if (!install.targetId || !targets.some((t) => t.id === install.targetId)) install.targetId = defaultTarget();
   const target = targets.find((t) => t.id === install.targetId);
   const installing = busy.has('install');
-  const existing = target ? s.skills.filter((sk) => sk.locationId === target.id && staged.some((st) => st.installName === sk.dirName)) : [];
+  // Only skills directly in the folder get replaced (not claude.ai synced ones or category sub-folders).
+  const existing = target ? s.skills.filter((sk) => sk.locationId === target.id && !sk.managed && !sk.group && !sk.namespace && staged.some((st) => st.installName === sk.dirName)) : [];
   const findings = staged.flatMap((x) => x.findings.map((f) => ({ ...f, file: `${x.installName}/${f.file}` })));
+  // Two clear choices (project / all projects), each with its recommended folder; any other folder is one click away.
+  const choice = (scope: 'workspace' | 'global', title: string, sub: string) => {
+    const t = recommendedTarget(scope);
+    if (!t) return null;
+    const active = install.targetId === t.id;
+    return h(
+      'button',
+      { class: `target-card ${active ? 'active' : ''}`, type: 'button', 'aria-pressed': active ? 'true' : 'false', onClick: () => ((install.targetId = t.id), render()) },
+      h('div', { class: 'target-title' }, icon(scope === 'workspace' ? 'root-folder' : 'home'), ` ${title}`),
+      h('div', { class: 'small muted' }, sub),
+      h('div', { class: 'mono small' }, t.label, t.exists ? '' : ' (will be created)'),
+      h('div', { class: 'vis' }, shown().map((p) => agentPill(p.id, t.readers.includes(p.id), short(p.displayName)))),
+    );
+  };
+  const recommendedIds = new Set([recommendedTarget('workspace')?.id, recommendedTarget('global')?.id]);
+  const covered = new Set(targets.filter((t) => recommendedIds.has(t.id)).flatMap(reach));
+  // Other folders: the ones that exist, plus new ones only when they add an installed agent the recommended ones don't reach.
+  const others = targets.filter((t) => !recommendedIds.has(t.id) && (t.exists || reach(t).some((r) => !covered.has(r))));
+  const otherList = install.showAllTargets
+    ? h(
+        'div',
+        { class: 'target-others', role: 'radiogroup', 'aria-label': 'Other folders' },
+        others.map((t) =>
+          h(
+            'label',
+            { class: `target-row ${install.targetId === t.id ? 'active' : ''}` },
+            h('input', { type: 'radio', name: 'target', checked: install.targetId === t.id ? true : undefined, onChange: () => ((install.targetId = t.id), render()) }),
+            h('span', { class: 'mono small' }, t.label),
+            h('span', { class: 'small muted' }, `${t.scope === 'workspace' ? 'project' : 'global'}${t.exists ? '' : ' · new folder'} · ${t.readers.map(providerName).join(', ')}`),
+          ),
+        ),
+        others.length ? null : h('p', { class: 'small muted' }, 'No other folder adds an agent you have installed.'),
+      )
+    : null;
   const sel = h(
-    'select',
-    {
-      class: 'target',
-      'aria-label': 'Install location',
-      onChange: (e: Event) => {
-        install.targetId = (e.target as HTMLSelectElement).value;
-        render();
-      },
-    },
-    (['workspace', 'global'] as const).map((scope) => {
-      const group = targets.filter((t) => t.scope === scope);
-      if (!group.length) return null;
-      return h(
-        'optgroup',
-        { label: scope === 'workspace' ? 'This workspace' : 'Global (all projects)' },
-        group.map((t) => h('option', { value: t.id, selected: t.id === install.targetId ? true : undefined }, `${t.label} — ${t.readers.map(providerName).join(', ')}${t.exists ? '' : ' (new folder)'}`)),
-      );
-    }),
+    'div',
+    { class: 'target-choice' },
+    h('div', { class: 'target-cards' }, choice('workspace', 'This project', 'Shared with everyone who clones the repository'), choice('global', 'All my projects', 'Only on this machine, in every project')),
+    others.length || install.showAllTargets
+      ? button(install.showAllTargets ? 'Hide other folders' : `Choose another folder… (${others.length})`, () => ((install.showAllTargets = !install.showAllTargets), render()), { kind: 'link' })
+      : null,
+    otherList,
   );
+
   return h(
     'section',
     { class: 'panel' },
@@ -243,9 +276,7 @@ export function step3(staged: ViewStaged[]): Node {
     findingList(findings),
     h('h3', null, 'Where to install'),
     targets.length ? h('div', null, sel) : h('p', { class: 'banner warn' }, 'No writable skill folders available.'),
-    target
-      ? h('div', { class: 'vis big' }, shown().map((p) => agentPill(p.id, target.readers.includes(p.id))))
-      : null,
+    target && !recommendedIds.has(target.id) ? h('div', { class: 'vis big' }, shown().map((p) => agentPill(p.id, target.readers.includes(p.id)))) : null,
     target ? h('p', { class: 'mono small muted' }, target.path) : null,
     existing.length ? h('div', { class: 'banner warn small' }, `Already in this folder: ${existing.map((x) => x.name).join(', ')}. Installing replaces them; the current version is kept as a backup.`) : null,
     h('div', { class: 'inline' }, button(installing ? 'Installing…' : 'Install…', () => {

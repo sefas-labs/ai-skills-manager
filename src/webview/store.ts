@@ -50,6 +50,8 @@ export const install = {
   expanded: new Set<string>(),
   staged: null as ViewStaged[] | null,
   targetId: '',
+  /** "Choose another folder…" expanded. */
+  showAllTargets: false,
   done: null as { names: string[]; locationLabel: string } | null,
 };
 

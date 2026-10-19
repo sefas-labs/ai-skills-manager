@@ -214,3 +214,22 @@ test('config tab: sections per kind, MCP servers with names only, duplicates fla
   click('react.mdc');
   assert.deepEqual(sent.at(-1), { type: 'openCustomization', id: '1' });
 });
+
+test('install step 3: two recommended destinations, other folders only on request, no pointless new folders', () => {
+  const { doc, sent, post, click } = mount({ tab: 'install', installMode: 'url' });
+  post({ type: 'state', state: fixture() });
+  post({ type: 'inspection', inspection: { owner: 'acme', repo: 'skills', ref: 'main', commit: 'c'.repeat(40), subpath: '', url: 'https://github.com/acme/skills', notes: [], candidates: [{ id: 'c1', repoDir: 'skills/x', installName: 'x', fileCount: 1, files: ['SKILL.md'], skipped: [], totalBytes: 10, issues: [], findings: [], skillMdPreview: '', installable: true }] } });
+  post({ type: 'staged', staged: [{ candidateId: 'c1', installName: 'x', fileCount: 1, bytes: 10, findings: [] }] });
+  const cards = [...doc.querySelectorAll('.target-card')];
+  assert.deepEqual(cards.map((c) => c.querySelector('.target-title').textContent.trim()), ['This project', 'All my projects']);
+  // Project: .claude/skills reaches Claude, Cursor and Copilot (the installed agents) → recommended over .agents/skills.
+  assert.match(cards[0].textContent, /\.claude\/skills/);
+  assert.ok(!doc.querySelector('.target-choice').textContent.includes('new folder'), 'no "new folder" noise by default');
+  click(/^ ?All my projects/, doc.querySelector('.target-choice'));
+  click('Install…');
+  assert.deepEqual(sent.at(-1), { type: 'install', locationId: 'gc' });
+  click(/Choose another folder/);
+  const rows = [...doc.querySelectorAll('.target-row')].map((r) => r.textContent);
+  assert.ok(rows.some((r) => r.includes('.agents/skills')), 'existing folders are offered');
+  assert.ok(!rows.some((r) => r.includes('.codex/skills')), 'a new folder that adds no installed agent is not offered');
+});
