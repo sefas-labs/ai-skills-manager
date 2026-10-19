@@ -7,6 +7,7 @@ import { inTab, skillsView, tabOf } from './skills';
 import { analyze, installView } from './install';
 import { overview } from './overview';
 import { mapView } from './map';
+import { configView } from './config';
 
 declare const __BUILD_ID__: string;
 
@@ -107,7 +108,7 @@ export function header() {
     'header',
     { class: 'top' },
     h('div', { class: 'brand' }, h('div', { class: 'logo', 'aria-hidden': 'true' }), h('div', null, h('h1', null, 'AI Skills', ui.state?.host.agentId ? h('span', { class: 'chip host', title: 'Editor this dashboard runs in' }, ui.state.host.appName) : null), h('p', { class: 'muted small' }, ui.state ? `${total} skill${total === 1 ? '' : 's'} · scanned ${scanned}` : 'Scanning…'))),
-    h('nav', { class: 'tabs', role: 'tablist' }, tab('overview', 'Overview', 'dashboard'), tab('project', `Project${count('project')}`, 'root-folder'), tab('global', `Global${count('global')}`, 'home'), tab('map', 'Map', 'type-hierarchy'), tab('install', 'Install', 'cloud-download')),
+    h('nav', { class: 'tabs', role: 'tablist' }, tab('overview', 'Overview', 'dashboard'), tab('project', `Project${count('project')}`, 'root-folder'), tab('global', `Global${count('global')}`, 'home'), tab('map', 'Map', 'type-hierarchy'), tab('config', 'Config', 'settings-gear'), tab('install', 'Install', 'cloud-download')),
     h('button', { class: `btn icon ${busy.has('refresh') ? 'spin' : ''}`, title: 'Rescan skill folders', 'aria-label': 'Refresh', onClick: () => send({ type: 'refresh' }) }, icon('refresh')),
   );
 }
@@ -125,6 +126,7 @@ export function body(): Node {
   if (persisted.tab === 'project' || persisted.tab === 'global') return skillsView(persisted.tab);
   if (persisted.tab === 'install') return installView();
   if (persisted.tab === 'map') return mapView();
+  if (persisted.tab === 'config') return configView();
   return overview();
 }
 

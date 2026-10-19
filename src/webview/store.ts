@@ -15,7 +15,7 @@ export const ui = {
   staleHost: false,
 };
 
-export type Tab = 'overview' | 'project' | 'global' | 'map' | 'install';
+export type Tab = 'overview' | 'project' | 'global' | 'map' | 'config' | 'install';
 
 export type SkillsTab = 'project' | 'global';
 

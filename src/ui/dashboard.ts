@@ -155,6 +155,12 @@ export class DashboardPanel implements vscode.Disposable {
           await this.withBusy('toggle', () => setSkillToggle(this.service, m.skillId, req as ToggleRequest));
           return;
         }
+        case 'openCustomization': {
+          // Only files from the inventory, opened as text (never executed).
+          const item = this.service.customizations[Number(m.id)];
+          if (item) await vscode.window.showTextDocument(vscode.Uri.file(item.path), { preview: true });
+          return;
+        }
         case 'archiveSynced': {
           const loc = this.service.current?.locations.find((l) => l.skippedSyncedBuckets?.some((b) => b.bucket === m.bucket));
           const b = loc?.skippedSyncedBuckets?.find((x) => x.bucket === m.bucket);

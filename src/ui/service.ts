@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { detectAgents, hostAgentFor, type AgentDetection } from '../core/agents';
 import { discover, DiscoverOptions, readClaudeSyncBucket } from '../core/discovery';
 import { fixesFor } from '../core/fixes';
+import { mcpDuplicates, readCustomizations, type CustomizationItem } from '../core/customizations';
 import { CatalogStore } from './catalog';
 import { readToggleState, toggleFiles, type SkillToggleState } from '../core/toggles';
 import { mergeSuggestions, type MergeSuggestion } from '../core/merge';
@@ -33,6 +34,7 @@ export class SkillsService implements vscode.Disposable {
   agents: Record<string, AgentDetection> = {};
   readonly catalog = new CatalogStore(this);
   merges: MergeSuggestion[] = [];
+  customizations: CustomizationItem[] = [];
   private toggles = new Map<string, SkillToggleState>();
   readonly hostAgent = hostAgentFor(vscode.env.appName);
 
@@ -128,6 +130,14 @@ export class SkillsService implements vscode.Disposable {
         ).catch(() => ({}) as Record<string, AgentDetection>),
       ]);
       this.agents = agents;
+      this.customizations = await readCustomizations({
+        homeDir: ctx.homeDir,
+        workspaceFolders: ctx.workspaceFolders,
+        platform: ctx.platform,
+        // VS Code keeps the profile's mcp.json next to globalStorage (User/mcp.json); Cursor uses ~/.cursor/mcp.json.
+        vscodeUserMcp: this.hostAgent === 'copilot' ? path.join(path.dirname(path.dirname(this.storageDir)), 'mcp.json') : undefined,
+        codexHome: process.env.CODEX_HOME,
+      }).catch(() => []);
       const installed = Object.entries(agents).filter(([, a]) => a.installed).map(([id]) => id);
       this.merges = await mergeSuggestions(result.skills, result.locations, { relevantAgents: installed }).catch(() => []);
       this.toggles = new Map(
@@ -262,6 +272,10 @@ export class SkillsService implements vscode.Disposable {
       buildId: __BUILD_ID__,
       host: { appName: vscode.env.appName, agentId: this.hostAgent },
       agents: this.agents,
+      customizations: {
+        items: this.customizations.map((c, i) => ({ ...c, id: String(i), path: undefined, displayPath: tildify(c.path, home) })),
+        mcpDuplicates: mcpDuplicates(this.customizations).map((d) => ({ ...d, files: d.files.map((f) => tildify(f.replace(/#local$/, ''), home) + (f.endsWith('#local') ? ' (local)' : '')) })),
+      },
       merges: this.merges.map((m) => ({
         ...m,
         copies: m.copies.map((c) => ({

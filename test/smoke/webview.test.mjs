@@ -192,3 +192,25 @@ test('per-agent switches post each agent own mechanism', () => {
   click('Only /name', fm);
   assert.deepEqual(sent.at(-1), { type: 'setToggle', skillId: 'g2', agent: 'frontmatter', mode: 'manual' });
 });
+
+test('config tab: sections per kind, MCP servers with names only, duplicates flagged, open posts the id', () => {
+  const { doc, sent, post, click, errors } = mount({ tab: 'config' });
+  const state = fixture();
+  state.customizations = {
+    items: [
+      { id: '0', kind: 'instructions', displayPath: '~/repo/CLAUDE.md', scope: 'project', agents: ['claude-code', 'copilot'], title: 'CLAUDE.md' },
+      { id: '1', kind: 'rule', displayPath: '~/repo/.cursor/rules/react.mdc', scope: 'project', agents: ['cursor'], title: 'react.mdc', description: 'React rules' },
+      { id: '2', kind: 'mcp', displayPath: '~/repo/.mcp.json', scope: 'project', agents: ['claude-code', 'copilot'], title: '.mcp.json', servers: [{ name: 'github', transport: 'http', url: 'https://api.example.com/mcp', envKeys: [], headerKeys: ['Authorization'], enabled: true }] },
+    ],
+    mcpDuplicates: [{ agent: 'claude-code', name: 'github', files: ['~/repo/.mcp.json', '~/.claude.json'] }],
+  };
+  post({ type: 'state', state });
+  assert.deepEqual(errors(), []);
+  const text = doc.body.textContent;
+  assert.match(text, /Instructions1/);
+  assert.match(text, /React rules/);
+  assert.match(text, /header Authorization/);
+  assert.match(doc.querySelector('.banner.warn').textContent, /Claude Code: github/);
+  click('react.mdc');
+  assert.deepEqual(sent.at(-1), { type: 'openCustomization', id: '1' });
+});

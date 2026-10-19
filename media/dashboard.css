@@ -422,3 +422,22 @@ details.merges[open] > summary { margin-bottom: 8px; }
 .small-seg .seg { padding: 2px 9px; font-size: 0.88em; }
 .small-seg .seg:disabled { cursor: default; }
 .small-seg .seg.active:disabled { opacity: 1; }
+
+/* Config tab */
+.cfg-list { list-style: none; margin: 0; padding: 0; }
+.cfg-item { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.cfg-item:last-child { border-bottom: 0; }
+.cfg-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cfg-title { font-weight: 600; }
+.cfg-desc { margin: 2px 0; }
+.cfg-mcp { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; margin: 8px 0; }
+.cfg-agents { margin-left: auto; }
+.cfg-servers { margin-top: 6px; }
+.cfg-servers td { padding: 4px 8px; }
+.cfg-servers td .chip { margin-right: 4px; }
+.config h2 { display: flex; align-items: center; gap: 6px; }
+.cfg-servers { table-layout: fixed; }
+.cfg-servers td:nth-child(1) { width: 180px; }
+.cfg-servers td:nth-child(2) { width: 80px; }
+.cfg-servers td:nth-child(3) { word-break: break-all; }
+.cfg-servers td:nth-child(4) { width: 240px; }

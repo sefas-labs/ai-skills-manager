@@ -90,6 +90,18 @@ export interface ViewMerge {
   }>;
 }
 
+export interface ViewCustomization {
+  id: string;
+  kind: 'instructions' | 'rule' | 'agent' | 'command' | 'mcp';
+  displayPath: string;
+  scope: 'project' | 'user' | 'local' | 'admin';
+  agents: string[];
+  title: string;
+  description?: string;
+  note?: string;
+  servers?: Array<{ name: string; transport: string; command?: string; url?: string; envKeys: string[]; headerKeys: string[]; enabled: boolean }>;
+}
+
 export interface ViewState {
   scannedAt: string;
   /** Build of the extension host; the webview compares it with its own. */
@@ -100,6 +112,8 @@ export interface ViewState {
   agents: Record<string, AgentDetection>;
   /** Duplicate skills that can be merged (same name, same scope). */
   merges: ViewMerge[];
+  /** Instructions, rules, subagents, commands and MCP servers per agent (read-only). */
+  customizations?: { items: ViewCustomization[]; mcpDuplicates: Array<{ agent: string; name: string; files: string[] }> };
   updatesCheckedAt?: string;
   trusted: boolean;
   githubSignedIn: boolean;
@@ -185,6 +199,7 @@ export type WebviewToHost =
   | { type: 'catalogSearch'; query: string }
   | { type: 'openUrl'; url: string }
   | { type: 'archiveSynced'; bucket: string }
+  | { type: 'openCustomization'; id: string }
   | { type: 'setToggle'; skillId: string; agent: 'claude'; value: 'on' | 'name-only' | 'user-invocable-only' | 'off' }
   | { type: 'setToggle'; skillId: string; agent: 'codex'; enabled: boolean }
   | { type: 'setToggle'; skillId: string; agent: 'frontmatter'; mode: 'auto' | 'manual' | 'off' }

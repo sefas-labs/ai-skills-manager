@@ -95,6 +95,13 @@ Bugs corregidos:
   - **Cursor y Copilot:** `disable-model-invocation` / `user-invocable` en el SKILL.md. Se avisa de que edita el skill y afecta a todos los agentes que respetan esas claves.
 
   Todos los cambios pasan por un modal que indica el archivo y guardan un backup. La lista marca *off: Claude*, *off: Codex*, *manual* y *disabled*.
+- **Pestaña Config** (solo lectura): instrucciones, reglas, subagentes, comandos y servidores MCP de cada agente, con rutas verificadas en la documentación oficial (19-oct-2026).
+  - **Instrucciones:** `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md` y el `CLAUDE.md` gestionado; `AGENTS.md`, con la regla de Claude de leerlo solo si no hay `CLAUDE.md`; `AGENTS.override.md` de Codex; `copilot-instructions.md`.
+  - **Reglas:** `.claude/rules`, `.cursor/rules/**/*.mdc` y `.github/instructions`.
+  - **Subagentes y comandos:** `.claude/agents` y `.claude/commands`.
+  - **MCP:** `.mcp.json`, `~/.claude.json` (usuario y local), `.cursor/mcp.json`, `.vscode/mcp.json`, el `mcp.json` del perfil de VS Code, `~/.copilot/mcp-config.json` y `[mcp_servers.*]` de Codex.
+  - **Secretos:** de `env` y `headers` solo se muestran los nombres. Se ocultan los argumentos con pinta de credencial y las contraseñas de las cadenas de conexión, y las URLs se muestran sin query string.
+  - Avisa cuando el mismo servidor MCP está en dos archivos de un mismo agente.
 - `npm run test:e2e`: ejecuta la extensión dentro de VS Code o Cursor reales, con un perfil temporal y un proxy local.
 
 ## 0.1.0 — 2026-10-18
