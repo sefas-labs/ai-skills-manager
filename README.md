@@ -12,12 +12,16 @@ Screenshots are in `docs/images/`.
   - **Monorepos:** also scans parent folders up to the repository root (Claude Code, Codex) and nested skills folders (Claude Code, Cursor).
   - Includes skills synced from claude.ai (`~/.claude/skills/synced`, read-only).
 - **Visibility matrix:** which agent loads which folder, and therefore each skill.
+- **Map tab:** a skill × agent coverage table that says why an agent can't use a skill and copies it to the folder that closes the gap, plus an interactive agent → folder → skill diagram.
+- **Knows your setup:** recognizes whether it runs in Cursor or VS Code and highlights that editor's agent. It also detects which of the four agents are installed (from files only: CLI on PATH, app, config file or editor extension; nothing is executed) and hides the ones it can't find, with a toggle to show all.
 - **Diagnostics:**
   - duplicate names that one agent sees in two different folders;
   - frontmatter that breaks the [agentskills.io](https://agentskills.io/specification) spec (`name` ≠ folder name, missing `description`, length limits);
   - `skill.md` with the wrong casing;
   - broken symlinks;
   - folders without a `SKILL.md`.
+- **Merge suggestions for duplicates:** when the same skill sits in several folders of the same scope, it suggests the smallest set of copies that still reaches every installed agent. *Merge* moves the redundant copies to the backup folder, *Use this version* makes differing copies identical, and *Compare* opens a file-by-file diff.
+- **One-click fixes:** *Fix…* next to each fixable problem (or *Fix all*): set `name` to the folder name or rename the folder, add a missing `name`/`description`/frontmatter, rename `skill.md` to `SKILL.md`, remove a broken link. The exact change is shown first, SKILL.md edits are minimal one-line edits, and a backup is kept.
 - **Install from GitHub** (repository, folder, `…/blob/…/SKILL.md` or `owner/repo`):
   1. Analyzes the repository and rejects anything that isn't a skill, with a hint when it looks like a plugin or an MCP server.
   2. Lets you choose which skills to install.
@@ -27,6 +31,7 @@ Screenshots are in `docs/images/`.
 - **Safe uninstall:** the folder is moved to a recoverable backup. If it's a symlink, only the link is removed.
 - **Provenance:** records the repository, ref, commit and tree SHA of everything it installs. It also reads the provenance that `gh skill install` writes into `SKILL.md`.
 - **Updates:** *Check for Updates* compares the installed tree SHA with the remote one (2 API calls per repository and branch). *Update…* first shows the added, modified and removed files, your local edits and the security review, then replaces the folder and keeps a backup.
+- **Add to project:** one click copies a global skill into the open project's skills folder that reaches the most installed agents.
 - **Copy or move** between folders (global ↔ workspace, `.claude/skills` ↔ `.agents/skills`): before writing, shows which agents gain and lose the skill.
 - Side bar, dashboard, light/dark/high-contrast themes, Workspace Trust.
 
@@ -125,4 +130,4 @@ Full market, product and architecture analysis (in Spanish): `docs/ANALISIS.md`.
 
 ## License
 
-MIT
+MIT. The dashboard bundles [Codicons](https://github.com/microsoft/vscode-codicons) (icon font © Microsoft, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)).
